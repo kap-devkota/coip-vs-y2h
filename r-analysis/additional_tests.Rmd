@@ -1,0 +1,94 @@
+---
+title: "r-tests"
+output: html_document
+date: "2023-06-26"
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library("dplyr")
+# install.packages("igraph")
+library("igraph")
+```
+
+## Test 1: Are the Co-IP and Y2H networks structurally similar?
+
+In this test, we try to find out how often does the triadic closure motiff occur in $G_c$ and $G_y$.
+
+```{r test1-setup}
+dgc <- read.csv("../data/networks/coip_hc_full.tsv", sep = "\t", header = FALSE)
+dgy <- read.csv("../data/networks/y2h_hc_full.tsv", sep = "\t", header = FALSE)
+
+# Ordering the columns of both Gc and Gy
+
+dgc[which(dgc$V1 > dgc$V2), c("V1", "V2")] <- dgc[which(dgc$V1 > dgc$V2), c("V2", "V1")]
+dgy[which(dgy$V1 > dgy$V2), c("V1", "V2")] <- dgy[which(dgy$V1 > dgy$V2), c("V2", "V1")]
+```
+
+Find $G$ from $G_c$ and $G_y$ by finding all the common nodes and edges between them.
+```{r test1-findG}
+dG <- merge(Gc, Gy, by.x = c("V1", "V2"), by.y= c("V1", "V2"), all.x = FALSE, all.y = FALSE)
+dG[c("V1", "V2")]
+```
+Compute the actual iGraph $G$.
+
+```{r test1-create-graph}
+G <- graph_from_data_frame(dG[c("V1", "V2")], directed = FALSE) #, vertices = nodesG)
+default_triangles <- length(triangles(G))
+default_triangles
+```
+
+
+Now, we start the experiment by randomly adding edges in $G$ corresponding to $G_c$ and $G_y$
+
+```{r test1-get-nodes}
+Gnodes <- V(G)$name
+Gcnodes <- union(dgc$V1, dgc$V2)
+Gynodes <- union(dgy$V1, dgy$V2)
+Gcmissing <- setdiff(Gcnodes, Gnodes)
+Gymissing <- setdiff(Gynodes, Gnodes)
+
+# DEBUG
+c(length(Gnodes), length(Gcnodes), length(Gynodes), length(Gcmissing), length(Gymissing))
+
+# Simulation function. Sample pairs and edges
+get_tcounts <- function(dftest, Gcommon, pairs, no_edges) {
+  nodestoadd <- union(pairs, V(Gcommon)$name)
+  edgetoadd  <- dftest[which(dftest$V1 %in% nodestoadd & dftest$V2 %in% nodestoadd), c("V1", "V2")]
+  edgetoadd <- edgetoadd[sample(nrow(edgetoadd), no_edges), ]
+  gtoadd <- graph_from_data_frame(edgetoadd, directed = FALSE)
+  g <- gtoadd %u% Gcommon
+  return(length(triangles(g)))
+}
+```
+
+Now we run the simulation for $G_c$
+
+```{r test1-run-gc}
+gc_tcounts <- c()
+no_edges <- 400
+K <- 20
+for(i in 1:50) {
+  pairs <- sample(Gcmissing, K)
+  gc_tcounts <- c(gc_tcounts, get_tcounts(dgc, G, pairs, no_edges))
+}
+gc_tcounts
+```
+
+Run the same simulation for $G_y$
+
+```{r test1-run-gy}
+gy_tcounts <- c()
+for(i in 1:50) {
+  pairs <- sample(Gymissing, K)
+  gy_tcounts <- c(gy_tcounts, get_tcounts(dgy, G, pairs, no_edges))
+}
+gy_tcounts
+```
+
+Now, do a two sample t test on `gc_tcounts` and `gy_tcounts`
+
+```{r test1-run-two-t}
+res <- t.test(gc_tcounts, gy_tcounts)
+res
+```
