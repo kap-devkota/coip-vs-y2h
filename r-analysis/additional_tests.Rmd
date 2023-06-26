@@ -26,10 +26,12 @@ dgy[which(dgy$V1 > dgy$V2), c("V1", "V2")] <- dgy[which(dgy$V1 > dgy$V2), c("V2"
 ```
 
 Find $G$ from $G_c$ and $G_y$ by finding all the common nodes and edges between them.
+
 ```{r test1-findG}
-dG <- merge(Gc, Gy, by.x = c("V1", "V2"), by.y= c("V1", "V2"), all.x = FALSE, all.y = FALSE)
+dG <- merge(dgc, dgy, by.x = c("V1", "V2"), by.y= c("V1", "V2"), all.x = FALSE, all.y = FALSE)
 dG[c("V1", "V2")]
 ```
+
 Compute the actual iGraph $G$.
 
 ```{r test1-create-graph}
@@ -37,7 +39,6 @@ G <- graph_from_data_frame(dG[c("V1", "V2")], directed = FALSE) #, vertices = no
 default_triangles <- length(triangles(G))
 default_triangles
 ```
-
 
 Now, we start the experiment by randomly adding edges in $G$ corresponding to $G_c$ and $G_y$
 
@@ -51,10 +52,18 @@ Gymissing <- setdiff(Gynodes, Gnodes)
 # DEBUG
 c(length(Gnodes), length(Gcnodes), length(Gynodes), length(Gcmissing), length(Gymissing))
 
-# Simulation function. Sample pairs and edges
-get_tcounts <- function(dftest, Gcommon, pairs, no_edges) {
-  nodestoadd <- union(pairs, V(Gcommon)$name)
-  edgetoadd  <- dftest[which(dftest$V1 %in% nodestoadd & dftest$V2 %in% nodestoadd), c("V1", "V2")]
+
+monte_carlo <- function(n_simulations, callback, ...) {
+  simulations <- 1:n_simulations
+  sapply(1:n_simulations, function(x){callback(...)})
+}
+
+# Given the test data-frame, common graph and sampled nodes, return the 
+# length of triangles
+sample_triangles <- function(dfGtest, Gcommon, missing_nodes, no_nodes, no_edges) {
+  sampled_nodes <- sample(missing_nodes, no_nodes)
+  nodestoadd <- union(sampled_nodes, V(Gcommon)$name)
+  edgetoadd  <- dfGtest[which(dfGtest$V1 %in% nodestoadd & dfGtest$V2 %in% nodestoadd), c("V1", "V2")]
   edgetoadd <- edgetoadd[sample(nrow(edgetoadd), no_edges), ]
   gtoadd <- graph_from_data_frame(edgetoadd, directed = FALSE)
   g <- gtoadd %u% Gcommon
@@ -62,33 +71,75 @@ get_tcounts <- function(dftest, Gcommon, pairs, no_edges) {
 }
 ```
 
-Now we run the simulation for $G_c$
+Now we run tests for different edge and node combinations
 
 ```{r test1-run-gc}
 gc_tcounts <- c()
-no_edges <- 400
-K <- 20
-for(i in 1:50) {
-  pairs <- sample(Gcmissing, K)
-  gc_tcounts <- c(gc_tcounts, get_tcounts(dgc, G, pairs, no_edges))
-}
-gc_tcounts
+E <- c(50, 100, 200, 300, 400, 500, 1000)
+K <- c(10, 20, 30, 40, 50, 100)
+n_simulations <- 50
+
+results <- expand.grid(E, K)
+colnames(results) <- c("Edges", "Nodes")
+results$pvalues <- apply(results, MARGIN=1, function(a) {
+  e <- a[1]
+  k <- a[2]
+  gc_counts <- monte_carlo(n_simulations, sample_triangles, 
+                           dgc, G, Gcmissing, k, e)
+  gy_counts <- monte_carlo(n_simulations, sample_triangles, 
+                           dgy, G, Gymissing, k, e)
+  res <- t.test(gc_counts, gy_counts)
+  return(res$p.value)
+})
+
+write.table(results, "test1-results.tsv", sep = "\t", row.names = FALSE)
 ```
 
-Run the same simulation for $G_y$
+Seeing the results for different Edge and Node combinations, even after applying multiple testing correction (Bonnoferoni), the alternate hypothesis is still accepted for all edges and nodes combinations.
 
-```{r test1-run-gy}
-gy_tcounts <- c()
-for(i in 1:50) {
-  pairs <- sample(Gymissing, K)
-  gy_tcounts <- c(gy_tcounts, get_tcounts(dgy, G, pairs, no_edges))
-}
-gy_tcounts
+## Test 2: Are do the networks see new likely links differently, provided some link-prediction functions
+
+Here, we test using two Link Prediction Algorithms:
+
+1.  Common Weighted
+2.  L3
+
+```{r test2-setup}
+dgc <- read.csv("../data/networks/coip_hc_full.tsv", sep = "\t", header = FALSE)
+dgy <- read.csv("../data/networks/y2h_hc_full.tsv", sep = "\t", header = FALSE)
+
+# Ordering the columns of both Gc and Gy
+
+dgc[which(dgc$V1 > dgc$V2), c("V1", "V2")] <- dgc[which(dgc$V1 > dgc$V2), c("V2", "V1")]
+dgy[which(dgy$V1 > dgy$V2), c("V1", "V2")] <- dgy[which(dgy$V1 > dgy$V2), c("V2", "V1")]
 ```
 
-Now, do a two sample t test on `gc_tcounts` and `gy_tcounts`
 
-```{r test1-run-two-t}
-res <- t.test(gc_tcounts, gy_tcounts)
-res
+```{r test2-utilities}
+library(Matrix)
+
+CWN <- function(mat) {
+  deg <- apply(mat, 1, sum)
+  Deg1_2 <- as(diag(1 / sqrt(deg)), "sparseMatrix")
+  row.names(Deg1_2) <- rownames(mat)
+  colnames(Deg1_2) <- colnames(mat)
+  mask <- mat
+  mask[mask > 0] <- 1
+  cw <- mat %*% mask + mask %*% mat
+  cw <- Deg1_2 %*% cw %*% Deg1_2
+  return(cw)
+}
+
+L3 <- function(mat) {
+  deg <- apply(mat, 1, sum)
+  Deg1_2 <- as(diag(1 / sqrt(deg)), "sparseMatrix")
+  mat1 <- Deg1_2 %*% mat %*% Deg1_2
+  return(mat %*% mat1 %*% mat)
+}
+
+Coip <- graph.data.frame(dgc, directed = FALSE)
+mat <- get.adjacency(Coip, sparse=FALSE, attr='V3')
+mat <- as(mat, "sparseMatrix")
+L3mat <- L3(mat)
+CWmat <- CWN(mat)
 ```
