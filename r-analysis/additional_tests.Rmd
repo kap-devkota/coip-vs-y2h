@@ -114,9 +114,26 @@ dgc[which(dgc$V1 > dgc$V2), c("V1", "V2")] <- dgc[which(dgc$V1 > dgc$V2), c("V2"
 dgy[which(dgy$V1 > dgy$V2), c("V1", "V2")] <- dgy[which(dgy$V1 > dgy$V2), c("V2", "V1")]
 ```
 
+Get the shared version of $G_c$ and $G_y$, by selecting all the edges associated with common nodes between the two networks.
+```{r test2-get-common}
+gcnodes <- union(dgc[[1]], dgc[[2]])
+gynodes <- union(dgy[[1]], dgy[[2]])
 
+gcommon <- intersect(gcnodes, gynodes)
+dgc_s <- dgc[which(dgc[[1]] %in% gcommon & dgc[[2]] %in% gcommon), ]
+dgy_s <- dgy[which(dgy[[1]] %in% gcommon & dgy[[2]] %in% gcommon), ]
+
+gcommon <- intersect(union(dgy_s$V1, dgy_s$V2), union(dgc_s$V1, dgc_s$V2))
+
+list(dgc_s,dgy_s)
+```
+
+Now, define the link prediction functions `L3` and `CWN`
 ```{r test2-utilities}
 library(Matrix)
+library(MASS)
+library(mnormt)
+
 
 CWN <- function(mat) {
   deg <- apply(mat, 1, sum)
@@ -137,9 +154,55 @@ L3 <- function(mat) {
   return(mat %*% mat1 %*% mat)
 }
 
-Coip <- graph.data.frame(dgc, directed = FALSE)
-mat <- get.adjacency(Coip, sparse=FALSE, attr='V3')
-mat <- as(mat, "sparseMatrix")
-L3mat <- L3(mat)
-CWmat <- CWN(mat)
+DSD <- function(mat, epsilon=1e-5, gamma = 1, normal=TRUE) {
+  d <- apply(mat, 1, sum)
+  
+  d[d == 0] <- epsilon
+  d_all <- sum(d)
+  d_1 <- 1 / d
+  
+  P <- A 
+}
 ```
+
+Now, we randomly generate node-pairs of size $K$, that are not present in either of the shared networks
+```{r test2-generate-samples}
+N <- 500
+dgcy_s <- rbind(dgc_s[c("V1", "V2")], dgy_s[c("V1", "V2")])
+dgcy_s <- dgcy_s[!duplicated(dgcy_s), ]
+
+get_k_samples <- function(df, nodes, n_samples) {
+  sampled_list <- as.data.frame(do.call(rbind, lapply(1:as.integer(n_samples * 1.5), function(i) {sample(nodes, 2, replace=FALSE)})))
+  sampled_list[which(sampled_list$V1 > sampled_list$V2), c("V1", "V2")] <-  sampled_list[which(sampled_list$V1 > sampled_list$V2), c("V2", "V1")]
+  return(anti_join(sampled_list, df, by=c("V1", "V2"))[1:n_samples, ])
+}
+
+results <- expand.grid(c(100, 200, 300, 400, 500), 1:5)
+colnames(results) <- c("No-samples", "Iteration")
+
+Coip <- graph.data.frame(dgc_s, directed = FALSE)
+Coip_mat <- get.adjacency(Coip, sparse = FALSE, attr='V3')
+Coip_mat <- as(Coip_mat, "sparseMatrix")
+
+Y2h <- graph.data.frame(dgy_s, directed = FALSE)
+Y2h_mat <- get.adjacency(Y2h, sparse = FALSE, attr='V3')
+Y2h_mat <- as(Y2h_mat, "sparseMatrix")
+
+
+CWMat_coip <- CWN(Coip_mat)
+CWMat_y2h <- CWN(Y2h_mat)
+
+L3Mat_coip <- L3(Coip_mat)
+L3Mat_y2h <- L3(Y2h_mat)
+
+get_scores <- function(samples, mat, coln) {
+  samples$coln <- apply(samples, 1, function(x) {return(mat[x[[0]], x[[1]]])})
+}
+
+samples <- get_k_samples(dgcy_s, gcommon, 500)
+samples$l3_coip <- apply(samples, 1, function(x) {return(L3Mat_coip[x[[1]], x[[2]]])})
+samples$l3_y2h <- apply(samples, 1, function(x) {return(L3Mat_y2h[x[[1]], x[[2]]])})
+sum(samples$l3_y2h != 0)
+```
+
+## Test 3: 
