@@ -154,19 +154,42 @@ L3 <- function(mat) {
   return(mat %*% mat1 %*% mat)
 }
 
-DSD <- function(mat, epsilon=1e-5, gamma = 1, normal=TRUE) {
+DSD <- function(mat, epsilon=1e-5, gamma = 1, normal=TRUE, dist = FALSE, sim = FALSE) {
   d <- apply(mat, 1, sum)
   
   d[d == 0] <- epsilon
   d_all <- sum(d)
   d_1 <- 1 / d
+  P <- sweep(mat, 1, d_1, "*")
   
-  P <- A 
+  e <- matrix(1, nrow=nrow(mat), ncol=1)
+  W <- (1 / d_all) * (e %*% t(e * d))
+  P1 <- gamma * (P - W)
+  
+  if (!is(P1, "matrix")) P1 <- as(P1, "matrix")
+  
+  X <- ginv(diag(nrow(mat)) - P1)
+  
+  if (normal) { X <- sweep(X, 2, sqrt(d_1), "*")}
+  
+  if (dist) {
+    X <- dist(X, diag=TRUE, upper=TRUE)
+    if (sim) {
+      X <- exp(-X)
+    }
+  }
+  
+  X <- as(X, "matrix")
+  
+  rownames(X) <- rownames(mat)
+  colnames(X) <- colnames(mat)
+  return(X)
 }
 ```
 
 Now, we randomly generate node-pairs of size $K$, that are not present in either of the shared networks
 ```{r test2-generate-samples}
+library("dplyr")
 N <- 500
 dgcy_s <- rbind(dgc_s[c("V1", "V2")], dgy_s[c("V1", "V2")])
 dgcy_s <- dgcy_s[!duplicated(dgcy_s), ]
@@ -177,32 +200,68 @@ get_k_samples <- function(df, nodes, n_samples) {
   return(anti_join(sampled_list, df, by=c("V1", "V2"))[1:n_samples, ])
 }
 
-results <- expand.grid(c(100, 200, 300, 400, 500), 1:5)
 colnames(results) <- c("No-samples", "Iteration")
 
 Coip <- graph.data.frame(dgc_s, directed = FALSE)
 Coip_mat <- get.adjacency(Coip, sparse = FALSE, attr='V3')
-Coip_mat <- as(Coip_mat, "sparseMatrix")
+# Coip_mat <- as(Coip_mat, "sparseMatrix")
 
 Y2h <- graph.data.frame(dgy_s, directed = FALSE)
 Y2h_mat <- get.adjacency(Y2h, sparse = FALSE, attr='V3')
-Y2h_mat <- as(Y2h_mat, "sparseMatrix")
+# Y2h_mat <- as(Y2h_mat, "sparseMatrix")
 
 
-CWMat_coip <- CWN(Coip_mat)
-CWMat_y2h <- CWN(Y2h_mat)
+# CWMat_coip <- CWN(Coip_mat)
+# CWMat_y2h <- CWN(Y2h_mat)
 
-L3Mat_coip <- L3(Coip_mat)
-L3Mat_y2h <- L3(Y2h_mat)
+# L3Mat_coip <- L3(Coip_mat)
+# L3Mat_y2h <- L3(Y2h_mat)
 
+DSDMat_coip <- DSD(Coip_mat, dist = TRUE, sim = TRUE)
+DSDMat_y2h <- DSD(Y2h_mat, dist = TRUE, sim = TRUE)
+rownames(DSDMat_coip)
+rownames(Coip_mat)
+
+
+results <- expand.grid(c(1000, 2000, 3000, 5000, 10000), 1:5)
 get_scores <- function(samples, mat, coln) {
   samples$coln <- apply(samples, 1, function(x) {return(mat[x[[0]], x[[1]]])})
 }
+scorr <- function(x, y) {
+  xr <- rank(x)
+  yr <- rank(y)
+  return(cov(xr, yr) / (sd(xr) * sd(yr)))
+}
 
-samples <- get_k_samples(dgcy_s, gcommon, 500)
-samples$l3_coip <- apply(samples, 1, function(x) {return(L3Mat_coip[x[[1]], x[[2]]])})
-samples$l3_y2h <- apply(samples, 1, function(x) {return(L3Mat_y2h[x[[1]], x[[2]]])})
-sum(samples$l3_y2h != 0)
+results$p_values <- apply(results, 1, function(x){
+  no_samples <- x[[1]]
+  samples <- get_k_samples(dgcy_s, gcommon, no_samples)
+  dsd_coip <- apply(samples, 1, function(x) {return(DSDMat_coip[x[[1]], x[[2]]])})
+  dsd_y2h <- apply(samples, 1, function(x) {return(DSDMat_y2h[x[[1]], x[[2]]])})
+  p_val <- wilcox.test(dsd_coip, dsd_y2h, alternative = "two.sided")$p.value
+  return(p_val)
+})
+
+results$scor <- apply(results, 1, function(x) {
+  no_samples <- x[[1]]
+  samples <- get_k_samples(dgcy_s, gcommon, no_samples)
+  dsd_coip <- apply(samples, 1, function(x) {return(DSDMat_coip[x[[1]], x[[2]]])})
+  dsd_y2h <- apply(samples, 1, function(x) {return(DSDMat_y2h[x[[1]], x[[2]]])})
+  spearman <- scorr(dsd_coip, dsd_y2h)
+  return(spearman)
+})
+
+```
+
+Visualizing Results
+```{r test2-visualize}
+library(ggplot2)
+resplot <- results
+colnames(resplot) <- c("Sampled Node-Pairs", "Iterations", "Spearman Correlation")
+resplot$`Sampled Node-Pairs` <- as.factor(resplot$`Sampled Node-Pairs`)
+p <- ggplot(resplot[c("Sampled Node-Pairs", "Spearman Correlation")], aes(x=`Sampled Node-Pairs`, y=`Spearman Correlation`)) +
+  geom_boxplot(notch = FALSE) + scale_color_grey() + theme_classic()
+p
 ```
 
 ## Test 3: 
