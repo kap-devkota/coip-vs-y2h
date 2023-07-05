@@ -93,6 +93,7 @@ results$pvalues <- apply(results, MARGIN=1, function(a) {
 })
 
 write.table(results, "test1-results.tsv", sep = "\t", row.names = FALSE)
+results
 ```
 
 Seeing the results for different Edge and Node combinations, even after applying multiple testing correction (Bonnoferoni), the alternate hypothesis is still accepted for all edges and nodes combinations.
@@ -272,8 +273,9 @@ MSigDB database
 ```{r test3-install-msigdb}
 ## Use these codes to install msigdb
 # install.packages("BiocManager")
-# BiocManager::install("msigdb")
+#BiocManager::install("msigdb")
 # browseVignettes("msigdb")
+print("Msigdb installed!")
 ```
 
 
@@ -282,6 +284,8 @@ library(msigdb)
 library(ExperimentHub)
 library(GSEABase)
 library(org.Hs.eg.db)
+library(dplyr)
+library(AnnotationDbi)
 
 INTERSECTING_THRESHOLD=10
 
@@ -291,7 +295,7 @@ msigdb.hs <- appendKEGG(msigdb.hs)
 keggdb <- msigdb.hs[sapply(msigdb.hs, function(i){return(grepl("KEGG", setName(i), fixed = TRUE))})]
 
 get_uniprot <- function(gset, commonprots){
-  geneset <- select(org.Hs.eg.db, columns=c("SYMBOL", "UNIPROT"), keys=geneIds(gset), keytype="SYMBOL")$UNIPROT
+  geneset <- AnnotationDbi::select(org.Hs.eg.db, columns=c("SYMBOL", "UNIPROT"), keys=geneIds(gset), keytype="SYMBOL")$UNIPROT
   geneset <- sapply(geneset, function(i) {return(paste("uniprotkb:", i, sep=""))})
   return(intersect(geneset, commonprots))
 }
@@ -316,7 +320,6 @@ gcommon <- intersect(union(dgy_s$V1, dgy_s$V2), union(dgc_s$V1, dgc_s$V2))
 
 Gc <- graph.data.frame(dgc_s, directed=FALSE)
 Gy <- graph.data.frame(dgy_s, directed=FALSE)
-
 df <- data.frame(keggname = sapply(keggdb, function(i){setName(i)})) 
 df$intersecting_nodes<-sapply(keggdb, function(i) {length(get_uniprot(i, gcommon))})
 filtered_kegg <- keggdb[sapply(df$intersecting_nodes, function(i) {i >= INTERSECTING_THRESHOLD})]
@@ -343,7 +346,7 @@ Plot the `df` results
 library(ggplot2)
 library(reshape2)
 library(dplyr)
-
+df
 dfgg <- melt(df, id=c("keggname", "intersecting_nodes"))
 colnames(dfgg) <- c("KEGG name", "Num. of Intersecting Nodes", "Net. Type", "Num. of Edges")
 
@@ -370,13 +373,69 @@ ggplot(dflargestcoipsgg, aes(x=`Num. of Intersecting Nodes`, y=`Num. of Edges`, 
 
 This is done by finding out how different networks respond to 
 
-```{r test4-get-data}
+```{r test4getdata, include=TRUE, echo=TRUE}
 library(hgnc)
+library(org.Hs.eg.db)
+# Function to get the UNIPROTKB id from gene symbol
+get_uniprot <- function(gset, commonprots){
+  geneset <- AnnotationDbi::select(org.Hs.eg.db, columns=c("SYMBOL", "UNIPROT"), keys=gset, keytype="SYMBOL")$UNIPROT
+  geneset <- sapply(geneset, function(i) {return(paste("uniprotkb:", i, sep=""))})
+  return(intersect(geneset, commonprots))
+}
+
 url <- latest_archive_url()
 download_archive(url=latest_archive_url(),
                  path = getwd(),
                  filename = basename(url))
 
+
+# Loading graphs
+dgc <- read.csv("../data/networks/coip_hc_full.tsv", sep = "\t", header = FALSE)
+dgy <- read.csv("../data/networks/y2h_hc_full.tsv", sep = "\t", header = FALSE)
+
+# Ordering the columns of both Gc and Gy
+
+dgc[which(dgc$V1 > dgc$V2), c("V1", "V2")] <- dgc[which(dgc$V1 > dgc$V2), c("V2", "V1")]
+dgy[which(dgy$V1 > dgy$V2), c("V1", "V2")] <- dgy[which(dgy$V1 > dgy$V2), c("V2", "V1")]
+
+gcnodes <- union(dgc[[1]], dgc[[2]])
+gynodes <- union(dgy[[1]], dgy[[2]])
+
+gcommon <- intersect(gcnodes, gynodes)
+dgc_s <- dgc[which(dgc[[1]] %in% gcommon & dgc[[2]] %in% gcommon), ]
+dgy_s <- dgy[which(dgy[[1]] %in% gcommon & dgy[[2]] %in% gcommon), ]
+
+gcommon <- intersect(union(dgy_s$V1, dgy_s$V2), union(dgc_s$V1, dgc_s$V2))
+
+Gc <- graph.data.frame(dgc_s, directed=FALSE)
+Gy <- graph.data.frame(dgy_s, directed=FALSE)
+
+```
+
+
+Now, get kinases and proteases
+
+```{r test4-getkinases}
+library(clustAnalytics)
+
 proteinsdf <- read.delim("hgnc_complete_set.txt", sep = "\t")
-proteinsdf[which(sapply(proteinsdf$gene_group, function(i){grepl("protease", i, fixed = TRUE)})), ] #[which(proteinsdf$gene_goup)]
+proteases <- proteinsdf[which(sapply(proteinsdf$gene_group, function(i){grepl("protease", i, fixed = TRUE)})), ]
+kinases <- proteinsdf[which(sapply(proteinsdf$gene_group, function(i){grepl("kinase", i, fixed = TRUE)})), ]
+pprots <- get_uniprot(proteases$symbol, gcommon)
+kprots <- get_uniprot(kinases$symbol, gcommon)
+pkprots <- c(pprots, kprots)
+get_conductance <- function(G, nodes) {
+  vol <- sum(degree(G)[nodes])
+}
+dgc_sp <- dgc_s[which(dgc_s$V1 %in% pkprots | dgc_s$V2 %in% pkprots), ] 
+dgc_sp <- dgc_sp[which(!(dgc_sp$V1 %in% pkprots & dgc_sp$V2 %in% pkprots)), ]
+
+conductance_c <- length(dgc_sp) / sum(degree(Gc)[pkprots])
+conductance_c
+
+dgy_sp <- dgy_s[which(dgy_s$V1 %in% pkprots | dgy_s$V2 %in% pkprots), ]
+dgy_sp <- dgy_sp[which(!(dgy_sp$V1 %in% pkprots & dgy_sp$V2 %in% pkprots)), ]
+
+conductance_y <- length(dgy_sp) / sum(degree(Gy)[pkprots])
+data.frame(list(Ccoip = conductance_c, Cy2h = conductance_y))
 ```
