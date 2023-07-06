@@ -300,6 +300,34 @@ get_uniprot <- function(gset, commonprots){
   return(intersect(geneset, commonprots))
 }
 
+
+get_conductance <- function(dg, nodes, G = NULL) {
+  if (is.null(G)) {
+    G <- graph.data.frame(dg, directed = FALSE)
+  }
+  vol <- sum(igraph::degree(G)[nodes])
+  vol1 <- sum(igraph::degree(G)[sapply(V(G)$name, function(i){return(!(i %in% nodes))})])
+  if(vol1 < vol) {
+    vol <- vol1
+  }
+  dg_n <- dg[which(dg$V1 %in% nodes | dg$V2 %in% nodes), ]
+  dg_n <- dg_n[which(!(dg$V1 %in% nodes & dg$V2 %in% nodes)), ]
+  return(length(dg_n)/vol)
+}
+
+
+simulate_conductance <- function(dg, n_nodes, n_experiments = 100, G = NULL) {
+  if (is.null(G)) {
+    G <- graph.data.frame(dg, directed = FALSE)
+  }
+  conductances <- sapply(1:n_experiments, function(i) {
+    nodes <- sample(V(G)$name, n_nodes)
+    return(get_conductance(dg, nodes, G))
+  })
+  return(conductances)
+}
+
+
 # Loading graphs
 dgc <- read.csv("../data/networks/coip_hc_full.tsv", sep = "\t", header = FALSE)
 dgy <- read.csv("../data/networks/y2h_hc_full.tsv", sep = "\t", header = FALSE)
@@ -338,7 +366,15 @@ df$y2h_edges <- sapply(filtered_kegg, function(i){
   return(gsize(subG))
 })
 
-df
+df$coip_conductance <- sapply(filtered_kegg, function(i){
+  commonnodes <- get_uniprot(i, gcommon)
+  return(get_conductance(dgc_s, commonnodes, Gc))
+})
+
+df$y2h_conductance <- sapply(filtered_kegg, function(i){
+  commonnodes <- get_uniprot(i, gcommon)
+  return(get_conductance(dgy_s, commonnodes, Gy))
+})
 ```
 
 Plot the `df` results
@@ -346,8 +382,20 @@ Plot the `df` results
 library(ggplot2)
 library(reshape2)
 library(dplyr)
-df
-dfgg <- melt(df, id=c("keggname", "intersecting_nodes"))
+
+dfcond <- df[c("keggname", "intersecting_nodes", "coip_conductance", "y2h_conductance")]
+dfcond <- melt(dfcond, id=c("keggname", "intersecting_nodes"))
+colnames(dfcond) <- c("KEGG name", "Num. of Intersecting Nodes", "Net. Type", "Conductance")
+ggplot(dfcond, aes(x=`Num. of Intersecting Nodes`, y=`Conductance`, color=`Net. Type`))+
+  geom_point(shape=20) + theme_classic()
+
+dfcondpts <- df[c("keggname", "coip_conductance", "y2h_conductance")]
+colnames(dfcondpts) <- c("KEGG name", "CoIP conductance", "Y2H conductance")
+ggplot2::ggplot(dfcondpts, aes(x=`CoIP conductance`, y=`Y2H conductance`)) + ggplot2::geom_point(data=subset(dfcondpts, `CoIP conductance` > `Y2H conductance`), shape=17, color="red", size=2) + ggplot2::geom_point(data=subset(dfcondpts, `CoIP conductance` < `Y2H conductance`), shape=5, color="blue", size=2) + 
+  theme_classic() + geom_text(data=subset(dfcondpts, `CoIP conductance` > 0.07 | `Y2H conductance` > 0.07 ), aes(x=`CoIP conductance`, y=`Y2H conductance`, label=`KEGG name`), size=2, check_overlap = TRUE)
+dfcondpts
+ 
+dfgg <- melt(df[c("keggname", "intersecting_nodes", "coip_edges", "y2h_edges")], id=c("keggname", "intersecting_nodes"))
 colnames(dfgg) <- c("KEGG name", "Num. of Intersecting Nodes", "Net. Type", "Num. of Edges")
 
 dflargestcoips <- df %>%
@@ -409,33 +457,83 @@ gcommon <- intersect(union(dgy_s$V1, dgy_s$V2), union(dgc_s$V1, dgc_s$V2))
 
 Gc <- graph.data.frame(dgc_s, directed=FALSE)
 Gy <- graph.data.frame(dgy_s, directed=FALSE)
-
 ```
 
 
 Now, get kinases and proteases
 
 ```{r test4-getkinases}
-library(clustAnalytics)
 
 proteinsdf <- read.delim("hgnc_complete_set.txt", sep = "\t")
-proteases <- proteinsdf[which(sapply(proteinsdf$gene_group, function(i){grepl("protease", i, fixed = TRUE)})), ]
+# proteases <- proteinsdf[which(sapply(proteinsdf$gene_group, function(i){grepl("protease", i, fixed = TRUE)})), ]
+phosphatases <- proteinsdf[which(sapply(proteinsdf$gene_group, function(i){grepl("phosphatase", i, fixed = TRUE)})), ]
 kinases <- proteinsdf[which(sapply(proteinsdf$gene_group, function(i){grepl("kinase", i, fixed = TRUE)})), ]
-pprots <- get_uniprot(proteases$symbol, gcommon)
+pprots <- get_uniprot(phosphatases$symbol, gcommon)
 kprots <- get_uniprot(kinases$symbol, gcommon)
-pkprots <- c(pprots, kprots)
-get_conductance <- function(G, nodes) {
+
+
+get_conductance <- function(dg, nodes, G = NULL) {
+  if (is.null(G)) {
+    G <- graph.data.frame(dg, directed = FALSE)
+  }
   vol <- sum(degree(G)[nodes])
+  vol1 <- sum(degree(G)[sapply(V(G)$name, function(i){return(!(i %in% nodes))})])
+  if(vol1 < vol) {
+    vol <- vol1
+  }
+  dg_n <- dg[which(dg$V1 %in% nodes | dg$V2 %in% nodes), ]
+  dg_n <- dg_n[which(!(dg$V1 %in% nodes & dg$V2 %in% nodes)), ]
+  return(length(dg_n)/vol)
 }
-dgc_sp <- dgc_s[which(dgc_s$V1 %in% pkprots | dgc_s$V2 %in% pkprots), ] 
-dgc_sp <- dgc_sp[which(!(dgc_sp$V1 %in% pkprots & dgc_sp$V2 %in% pkprots)), ]
 
-conductance_c <- length(dgc_sp) / sum(degree(Gc)[pkprots])
-conductance_c
 
-dgy_sp <- dgy_s[which(dgy_s$V1 %in% pkprots | dgy_s$V2 %in% pkprots), ]
-dgy_sp <- dgy_sp[which(!(dgy_sp$V1 %in% pkprots & dgy_sp$V2 %in% pkprots)), ]
+simulate_conductance <- function(dg, n_nodes, n_experiments = 100, G = NULL) {
+  if (is.null(G)) {
+    G <- graph.data.frame(dg, directed = FALSE)
+  }
+  conductances <- sapply(1:n_experiments, function(i) {
+    nodes <- sample(V(G)$name, n_nodes)
+    return(get_conductance(dg, nodes, G))
+  })
+  return(conductances)
+}
 
-conductance_y <- length(dgy_sp) / sum(degree(Gy)[pkprots])
+get_conductance(dgc_s, kprots, Gc)
+
+sim_kinase <- simulate_conductance(dgy_s, length(kprots))
+c(mean(sim_kinase), sd(sim_kinase))
+
+
 data.frame(list(Ccoip = conductance_c, Cy2h = conductance_y))
+```
+
+Now, we do the operation for kinase and protease
+```{r test4-kinase}
+ck_coip <- get_conductance(dgc_s, kprots, Gc)
+ck_y2h <- get_conductance(dgy_s, kprots, Gy)
+
+cksim_coip <- simulate_conductance(dgc_s, length(kprots), G = Gc)
+cksim_y2h <- simulate_conductance(dgy_s, length(kprots), G = Gy)
+
+cp_coip <- get_conductance(dgc_s, pprots, Gc)
+cp_y2h <- get_conductance(dgy_s, pprots, Gy)
+
+cpsim_coip <- simulate_conductance(dgc_s, length(pprots), G = Gc)
+cpsim_y2h <- simulate_conductance(dgy_s, length(pprots), G = Gy)
+
+
+
+outputs <- data.frame(geneset_type = c("kinase", "phosphatase"),
+                      prot_sizes = c(length(kprots), length(pprots)),
+                      coip_conductance = c(ck_coip, cp_coip),
+                      y2h_conductance = c(ck_y2h, cp_y2h),
+                      simulation_no = c(100, 100),
+                      simulated_coip_conductance_mean = c(mean(cksim_coip), mean(cpsim_coip)),
+                      simulated_y2h_conductance_mean = c(mean(cksim_y2h), mean(cpsim_y2h)),
+                      simulated_coip_conductance_sd = c(sd(cksim_coip), sd(cpsim_coip)),
+                      simulated_y2h_conductance_sd = c(sd(cksim_y2h), sd(cpsim_y2h))
+                      )
+                      
+
+t(outputs)
 ```
