@@ -205,18 +205,11 @@ colnames(results) <- c("No-samples", "Iteration")
 
 Coip <- graph.data.frame(dgc_s, directed = FALSE)
 Coip_mat <- get.adjacency(Coip, sparse = FALSE, attr='V3')
-# Coip_mat <- as(Coip_mat, "sparseMatrix")
+Coip_mat <- as(Coip_mat, "sparseMatrix")
 
 Y2h <- graph.data.frame(dgy_s, directed = FALSE)
 Y2h_mat <- get.adjacency(Y2h, sparse = FALSE, attr='V3')
-# Y2h_mat <- as(Y2h_mat, "sparseMatrix")
-
-
-# CWMat_coip <- CWN(Coip_mat)
-# CWMat_y2h <- CWN(Y2h_mat)
-
-# L3Mat_coip <- L3(Coip_mat)
-# L3Mat_y2h <- L3(Y2h_mat)
+Y2h_mat <- as(Y2h_mat, "sparseMatrix")
 
 DSDMat_coip <- DSD(Coip_mat, dist = TRUE, sim = TRUE)
 DSDMat_y2h <- DSD(Y2h_mat, dist = TRUE, sim = TRUE)
@@ -224,7 +217,7 @@ rownames(DSDMat_coip)
 rownames(Coip_mat)
 
 
-results <- expand.grid(c(1000, 2000, 3000, 5000, 10000), 1:5)
+results <- expand.grid(c(1000, 2000, 3000, 5000, 10000), 1:10)
 get_scores <- function(samples, mat, coln) {
   samples$coln <- apply(samples, 1, function(x) {return(mat[x[[0]], x[[1]]])})
 }
@@ -264,6 +257,48 @@ p <- ggplot(resplot[c("Sampled Node-Pairs", "Spearman Correlation")], aes(x=`Sam
   geom_boxplot(notch = FALSE) + scale_color_grey() + theme_classic()
 p
 ```
+Do CWN and L3 tests on node-pairs that are of distance $2\leq d \leq 3$
+```{r test2-cwn-l3}
+getd2d3pairs <- function(G, gcommon, n_samples, get_d3 = TRUE) {
+  t_samples <- n_samples * 10
+  maxdeg <- ifelse(get_d3, 4, 3)
+  prospective_samples <- data.frame(do.call(rbind, lapply(1:t_samples, function(i) {gcommon, 2)})))
+  prospective_samples$distances <- apply(prospective_samples, 1, function(x) {
+    return(igraph::distances(G, v=x[1], to=x[2])[1, 1])
+  })
+  samples <- prospective_samples[which(prospective_samples$distances > 1 & prospective_samples$distances < maxdeg), ]
+  if(nrow(samples) > n_samples) {
+    samples <- samples[sample(nrow(samples), n_samples), ]
+  }
+  return(samples)  
+}
+
+results <- expand.grid(c(100, 200, 300, 500, 1000), 1:10)
+# CWN
+
+Gcs <- graph.data.frame(dgc_s, directed = FALSE)
+Gys <- graph.data.frame(dgy_s, directed = FALSE)
+
+CWMat_coip <- CWN(Coip_mat)
+CWMat_y2h <- CWN(Y2h_mat)
+
+L3Mat_coip <- L3(Coip_mat)
+L3Mat_y2h <- L3(Y2h_mat)
+
+results$scor <- apply(results, 1, function(x) {
+  no_samples <- x[[1]]
+  samples <- getd2d3pairs(Gcs, gcommon, no_samples, FALSE) # get only distance 2 pairs
+  
+  dsd_coip <- apply(samples, 1, function(x) {return(CWMat_coip[x[[1]], x[[2]]])})
+  dsd_y2h <- apply(samples, 1, function(x) {return(CWMat_y2h[x[[1]], x[[2]]])})
+  spearman <- scorr(dsd_coip, dsd_y2h)
+  return(spearman)
+})
+
+CWMat_coip[V(Gcs)$name[1], V(Gcs)$name[2]] 
+
+```
+
 
 ## Test 3: 
 
