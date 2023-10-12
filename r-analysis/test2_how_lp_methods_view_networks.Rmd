@@ -1,0 +1,297 @@
+---
+title: "test2-how-lp-methods-view-networks"
+output: html_document
+date: "2023-07-06"
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## Test 2: Are do the networks see new likely links differently, provided some link-prediction functions
+
+Here, we test using three Link Prediction Algorithms:
+
+1.  Normalized DSD
+2.  Common Weighted
+3.  L3
+
+Since CWN and L3 are both local methods that can only assign scores to node-pairs with distance 2 (for CWN) or 2-3 (for L3),
+in order to access the L3 scores between the CoIP and Y2H networks, we only sample node-pairs that are of distance no 
+greater than 3 (and for CWN, no greater than 2).
+
+
+
+We define the link prediction functions `L3`, `CWN` and `DSED`
+```{r test2-utilities}
+library(Matrix)
+library(MASS)
+library(mnormt)
+
+
+CWN <- function(mat) {
+  deg <- apply(mat, 1, sum)
+  Deg1_2 <- as(diag(1 / sqrt(deg)), "sparseMatrix")
+  row.names(Deg1_2) <- rownames(mat)
+  colnames(Deg1_2) <- colnames(mat)
+  mask <- mat
+  mask[mask > 0] <- 1
+  cw <- mat %*% mask + mask %*% mat
+  cw <- Deg1_2 %*% cw %*% Deg1_2
+  return(cw)
+}
+
+L3 <- function(mat) {
+  deg <- apply(mat, 1, sum)
+  Deg1_2 <- as(diag(1 / sqrt(deg)), "sparseMatrix")
+  mat1 <- Deg1_2 %*% mat %*% Deg1_2
+  return(mat %*% mat1 %*% mat)
+}
+
+DSD <- function(mat, epsilon=1e-5, gamma = 1, normal=TRUE, dist = FALSE, sim = FALSE) {
+  d <- apply(mat, 1, sum)
+  
+  d[d == 0] <- epsilon
+  d_all <- sum(d)
+  d_1 <- 1 / d
+  P <- sweep(mat, 1, d_1, "*")
+  
+  e <- matrix(1, nrow=nrow(mat), ncol=1)
+  W <- (1 / d_all) * (e %*% t(e * d))
+  P1 <- gamma * (P - W)
+  
+  if (!is(P1, "matrix")) P1 <- as(P1, "matrix")
+  
+  X <- ginv(diag(nrow(mat)) - P1)
+  
+  if (normal) { X <- sweep(X, 2, sqrt(d_1), "*")}
+  
+  if (dist) {
+    X <- dist(X, diag=TRUE, upper=TRUE)
+    if (sim) {
+      X <- exp(-X)
+    }
+  }
+  
+  X <- as(X, "matrix")
+  
+  rownames(X) <- rownames(mat)
+  colnames(X) <- colnames(mat)
+  return(X)
+}
+```
+
+
+Now, we obtain the networks
+```{r test2-setup}
+dgc <- read.csv("../data/networks/coip_hc_full.tsv", sep = "\t", header = FALSE)
+dgy <- read.csv("../data/networks/y2h_hc_full.tsv", sep = "\t", header = FALSE)
+
+# Ordering the columns of both Gc and Gy
+
+dgc[which(dgc$V1 > dgc$V2), c("V1", "V2")] <- dgc[which(dgc$V1 > dgc$V2), c("V2", "V1")]
+dgy[which(dgy$V1 > dgy$V2), c("V1", "V2")] <- dgy[which(dgy$V1 > dgy$V2), c("V2", "V1")]
+```
+
+Get the shared version of $G_c$ and $G_y$, by selecting all the edges associated with common nodes between the two networks.
+```{r test2-get-common}
+library(igraph)
+
+gcnodes <- union(dgc[[1]], dgc[[2]])
+gynodes <- union(dgy[[1]], dgy[[2]])
+
+gcommon <- intersect(gcnodes, gynodes)
+dgc_s <- dgc[which(dgc[[1]] %in% gcommon & dgc[[2]] %in% gcommon), ]
+dgy_s <- dgy[which(dgy[[1]] %in% gcommon & dgy[[2]] %in% gcommon), ]
+
+gcommon <- intersect(union(dgy_s$V1, dgy_s$V2), union(dgc_s$V1, dgc_s$V2))
+
+nunion <- dim(unique(rbind(dgc_s[c("V1", "V2")], dgy_s[c("V1", "V2")])))[1]
+ninter <- dim(unique(
+  inner_join(dgc_s, dgy_s, by=c("V1", "V2"))  
+))[1]
+jaccard <- ninter / nunion
+jaccard
+
+Coip <- graph.data.frame(dgc_s, directed = FALSE)
+Coip_mat <- get.adjacency(Coip, sparse = FALSE, attr='V3')
+Coip_mat <- as(Coip_mat, "sparseMatrix")
+
+Y2h <- graph.data.frame(dgy_s, directed = FALSE)
+Y2h_mat <- get.adjacency(Y2h, sparse = FALSE, attr='V3')
+Y2h_mat <- as(Y2h_mat, "sparseMatrix")
+
+list(dgc_s,dgy_s)
+```
+
+
+The function to get k samples from a dataset
+```{r test2-get-k-samples}
+get_k_samples <- function(df, nodes, n_samples) {
+  sampled_list <- as.data.frame(do.call(rbind, lapply(1:as.integer(n_samples * 1.5), function(i) {sample(nodes, 2, replace=FALSE)})))
+  sampled_list[which(sampled_list$V1 > sampled_list$V2), c("V1", "V2")] <-  sampled_list[which(sampled_list$V1 > sampled_list$V2), c("V2", "V1")]
+  return(anti_join(sampled_list, df, by=c("V1", "V2"))[1:n_samples, ])
+}
+
+```
+
+
+### Using Normalized DSD
+
+Now, we randomly generate node-pairs of size $K$, that are not present in either of the shared networks
+```{r test2-generate-samples}
+library("dplyr")
+
+# Find nodepairs not present in either networks
+
+dgcy_s <- rbind(dgc_s[c("V1", "V2")], dgy_s[c("V1", "V2")])
+dgcy_s <- dgcy_s[!duplicated(dgcy_s), ]
+
+DSDMat_coip <- DSD(Coip_mat, dist = TRUE, sim = TRUE)
+DSDMat_y2h <- DSD(Y2h_mat, dist = TRUE, sim = TRUE)
+
+results <- expand.grid(c(1000, 2000, 3000, 5000, 10000), 1:10)
+colnames(results) <- c("No-samples", "Iteration")
+
+get_scores <- function(samples, mat, coln) {
+  samples$coln <- apply(samples, 1, function(x) {return(mat[x[[0]], x[[1]]])})
+}
+
+scorr <- function(x, y) {
+  xr <- rank(x)
+  yr <- rank(y)
+  return(cov(xr, yr) / (sd(xr) * sd(yr)))
+}
+
+results$scor <- apply(results, 1, function(x) {
+  no_samples <- x[[1]]
+  samples <- get_k_samples(dgcy_s, gcommon, no_samples)
+  dsd_coip <- apply(samples, 1, function(x) {return(DSDMat_coip[x[[1]], x[[2]]])})
+  dsd_y2h <- apply(samples, 1, function(x) {return(DSDMat_y2h[x[[1]], x[[2]]])})
+  spearman <- scorr(dsd_coip, dsd_y2h)
+  return(spearman)
+})
+
+write_delim(results, "test2_dsd.tsv", delim = "\t")
+```
+
+Visualizing Results
+```{r test2-visualize}
+library(ggplot2)
+resplot <- results
+colnames(resplot) <- c("Sampled Node-Pairs", "Iterations", "Spearman Correlation")
+resplot$`Sampled Node-Pairs` <- as.factor(resplot$`Sampled Node-Pairs`)
+p <- ggplot(resplot[c("Sampled Node-Pairs", "Spearman Correlation")], aes(x=`Sampled Node-Pairs`, y=`Spearman Correlation`)) +
+  geom_boxplot(notch = FALSE) + scale_color_grey() + theme_classic()
+#p <- p + ggtitle("Link Prediction Method: Normalized DSD")
+p
+ggsave("dsd_test2_lp.png", plot = last_plot())
+```
+
+
+
+### Using CWN and L3 Methods
+
+Do CWN and L3 tests on node-pairs that are of distance $2\leq d \leq 3$
+```{r test2-cwn-l3}
+getd2d3pairs <- function(G, Gb, gcommon, n_samples, get_d3 = TRUE) {
+  t_samples <- n_samples * 25
+  maxdeg <- ifelse(get_d3, 4, 3)
+  prospective_samples <- data.frame(do.call(rbind, lapply(1:t_samples, function(i) {sample(gcommon, 2)})))
+  
+  prospective_samples$distances <- apply(prospective_samples, 1, function(x) {
+    da <- igraph::distances(G, v=x[1], to=x[2])[1, 1]
+    db <- igraph::distances(Gb, v=x[1], to=x[2])[1, 1]
+
+    if (min(da, db) <= 1) {
+      return(1)
+    }
+    else {
+    return(max(da, db))
+    }
+  })
+  
+  samples <- prospective_samples[which(prospective_samples$distances > 1 & prospective_samples$distances < maxdeg), ]
+  if(nrow(samples) > n_samples) {
+    samples <- samples[sample(nrow(samples), n_samples), ]
+  }
+  return(samples)  
+}
+
+results <- expand.grid(c(100, 200, 300, 500, 1000), 1:10)
+
+Gcs <- graph.data.frame(dgc_s, directed = FALSE)
+Gys <- graph.data.frame(dgy_s, directed = FALSE)
+
+CWMat_coip <- CWN(Coip_mat)
+CWMat_y2h <- CWN(Y2h_mat)
+
+L3Mat_coip <- L3(Coip_mat)
+L3Mat_y2h <- L3(Y2h_mat)
+
+results$l3scor <- apply(results, 1, function(x) {
+  no_samples <- x[[1]]
+  samples <- getd2d3pairs(Gcs, Gys, gcommon, no_samples, TRUE) 
+  print(dim(samples))
+  dsd_coip <- apply(samples, 1, function(x) {return(L3Mat_coip[x[[1]], x[[2]]])})
+  dsd_y2h <- apply(samples, 1, function(x) {return(L3Mat_y2h[x[[1]], x[[2]]])})
+  spearman <- scorr(dsd_coip, dsd_y2h)
+  return(spearman)
+})
+
+
+results
+
+
+library(readr)
+write_delim(results, file="test2_l3_results.tsv", delim = "\t")
+
+```
+
+Visualizing the results for L3
+```{r test2-l3-results}
+library(ggplot2)
+library(readr)
+library(dplyr)
+results <- read_delim("test2_l3_results.tsv", delim = "\t")
+resplot <- results
+colnames(resplot) <- c("Sampled Node-Pairs", "Iterations", "L3 Spearman Correlation")
+resplot
+resplotouts <- resplot %>% group_by(`Sampled Node-Pairs`) %>% summarize(`Corr. mean` = mean(`L3 Spearman Correlation`), `Corr. std` = sd(`L3 Spearman Correlation`))
+resplotouts
+
+p <- ggplot(resplotouts, aes(x=`Sampled Node-Pairs`, y=`Corr. mean`)) +
+  geom_point(size = 2) + scale_color_grey() + theme_classic() +
+  scale_y_continuous(limits = c(-0.2, 0.275)) +
+  geom_hline(yintercept = 0, size=0.2, linetype="dashed", color = "black") +
+  geom_errorbar(aes(ymin=`Corr. mean` - `Corr. std`, ymax=`Corr. mean` + `Corr. std`), width=26, linewidth= 0.4) + 
+  geom_point(data = resplot, mapping=aes(x=`Sampled Node-Pairs`, y = `L3 Spearman Correlation`),
+             color="blue", size = 0.5) + ggtitle("Link Prediction using L3") +
+  theme(text = element_text(size=20), plot.title = element_text(hjust=0.5)) 
+
+ggsave("l3_test2_lp.png", p)
+```
+
+
+
+```{r test2-dsd-results}
+results <- read_delim("test2_dsd.tsv", delim = "\t")
+resplot <- results
+resplot
+colnames(resplot) <- c("Sampled Node-Pairs", "Iterations", "Spearman Correlation")
+resplot$`Sampled Node-Pairs` <- as.factor(resplot$`Sampled Node-Pairs`)
+resplotouts <- resplot %>% group_by(`Sampled Node-Pairs`) %>% summarize(`Corr. mean` = mean(`Spearman Correlation`), `Corr. std` = sd(`Spearman Correlation`))
+resplotouts
+
+p <- ggplot(resplotouts, aes(x=`Sampled Node-Pairs`, y=`Corr. mean`)) +
+  geom_point(size = 2) + scale_color_grey() + theme_classic() +
+  scale_y_continuous(limits = c(-0.2, 0.2)) +
+  geom_hline(yintercept = 0, size=0.2, linetype="dashed", color = "black") +
+  geom_errorbar(aes(ymin=`Corr. mean` - `Corr. std`, ymax=`Corr. mean` + `Corr. std`), width=0.2, size= 0.4) + 
+  geom_point(data = resplot, mapping=aes(x=`Sampled Node-Pairs`, y = `Spearman Correlation`),
+             color="blue", size = 0.5) + ggtitle("Link Prediction using DSD") +
+  theme(text = element_text(size=20), plot.title = element_text(hjust=0.5)) 
+
+p
+ggsave("dsd_test2_lp.png", p)
+```

@@ -1,0 +1,159 @@
+---
+title: "R Notebook"
+output: html_notebook
+---
+
+Read the Disease-Protein association file
+
+```{r test5-read}
+require('biomaRt')
+library(dplyr)
+library(readr)
+library(tidyr)
+
+df <- read.csv("human_disease_knowledge_filtered.tsv", sep = "\t", header = FALSE)
+
+
+mart <- useMart('ENSEMBL_MART_ENSEMBL')
+mart <- useDataset('hsapiens_gene_ensembl', mart)
+
+annotLookup <- getBM(
+  mart = mart,
+  attributes = c(
+    'ensembl_peptide_id',
+    'uniprot_gn_id'),
+  uniqueRows=TRUE)
+annotLookup$uniprot_gn_id <- sapply(annotLookup$uniprot_gn_id, function(i) {
+  return(paste("uniprotkb:", i, sep=""))
+})
+
+annotLookup <- annotLookup[-1, ]
+
+df1 <- df[c("V1", "V4")] 
+df1 <- df1[-1,]
+df1
+
+df2 <- df1 %>% 
+  group_by(V4) %>%
+  filter(n() >= 10) %>%
+  ungroup()
+dfuprot <- do.call(rbind, lapply(split(df2, seq(nrow(df2)))
+                     , function(x) {
+  ensemb <- x[["V1"]]
+  disease <- x[["V4"]]
+  uprots <- annotLookup[which(annotLookup$ensembl_peptide_id == ensemb), ]$uniprot_gn_id
+  if(length(uprots) == 0) {
+    return(data.frame(gene=c(), disease=c()))
+  }    
+  else {
+    return(data.frame(gene=uprots, disease=disease))
+  }
+}))
+dfuprot
+write_delim(dfuprot, file="human_disease_uprot.tsv", delim = "\t")
+```
+
+Read the Co-IP and Y2H files
+
+```{r test5-coip-y2h}
+library(dplyr)
+library(readr)
+library(igraph)
+dis_a <- read.csv("human_disease_uprot.tsv", sep = "\t", header = TRUE)
+
+dgc <- read.csv("../data/networks/coip_hc_full.tsv", sep = "\t", header = FALSE)
+dgy <- read.csv("../data/networks/y2h_hc_full.tsv", sep = "\t", header = FALSE)
+
+dgc[which(dgc$V1 > dgc$V2), c("V1", "V2")] <- dgc[which(dgc$V1 > dgc$V2), c("V2", "V1")]
+dgy[which(dgy$V1 > dgy$V2), c("V1", "V2")] <- dgy[which(dgy$V1 > dgy$V2), c("V2", "V1")]
+
+gcnodes <- union(dgc[[1]], dgc[[2]])
+gynodes <- union(dgy[[1]], dgy[[2]])
+
+gcommon <- intersect(gcnodes, gynodes)
+dgc_s <- dgc[which(dgc[[1]] %in% gcommon & dgc[[2]] %in% gcommon), ]
+dgy_s <- dgy[which(dgy[[1]] %in% gcommon & dgy[[2]] %in% gcommon), ]
+
+gcommon <- intersect(union(dgy_s$V1, dgy_s$V2), union(dgc_s$V1, dgc_s$V2))
+
+
+Gc <- graph.data.frame(dgc_s, directed=FALSE)
+Gy <- graph.data.frame(dgy_s, directed=FALSE)
+
+dis_f <- dis_a[which(dis_a$gene %in% gcommon), ]
+dis_f
+```
+
+Filter the diseases geneset more such that each disease should have > 10 proteins 
+
+```{r test5-disease}
+dis_f1 <- unique(dis_f)
+dis_f1 <- dis_f1 %>%
+  group_by(disease) %>%
+  filter(n() >= 10) %>%
+  ungroup()
+
+dis_f1
+
+all_diseases <- unique(dis_f1$disease)
+length(all_diseases)
+```
+
+
+For each disease, run similar tests as test3
+
+```{r test5-conductance-edges}
+
+get_conductance <- function(dg, nodes, G = NULL) {
+  if (is.null(G)) {
+    G <- graph.data.frame(dg, directed = FALSE)
+  }
+  vol <- sum(igraph::degree(G)[nodes])
+  vol1 <- sum(igraph::degree(G)[sapply(V(G)$name, function(i){return(!(i %in% nodes))})])
+  if(vol1 < vol) {
+    vol <- vol1
+  }
+  dg_n <- dg[which(dg$V1 %in% nodes | dg$V2 %in% nodes), ]
+  dg_n <- dg_n[which(!(dg$V1 %in% nodes & dg$V2 %in% nodes)), ]
+  return(length(dg_n)/vol)
+}
+
+
+simulate_conductance <- function(dg, n_nodes, n_experiments = 100, G = NULL) {
+  if (is.null(G)) {
+    G <- graph.data.frame(dg, directed = FALSE)
+  }
+  conductances <- sapply(1:n_experiments, function(i) {
+    nodes <- sample(V(G)$name, n_nodes)
+    return(get_conductance(dg, nodes, G))
+  })
+  return(conductances)
+}
+
+
+disease_results <- data.frame(disease = all_diseases)
+disease_results$coip_intersect <- sapply(disease_results$disease, function(i) {
+  genes <- dis_f1[which(dis_f1$disease == i), ]$gene
+  subG <- subgraph(Gc, genes)
+  return(gsize(subG))
+})
+
+disease_results$y2h_intersect <- sapply(disease_results$disease, function(i) {
+  genes <- dis_f1[which(dis_f1$disease == i), ]$gene
+  subG <- subgraph(Gy, genes)
+  return(gsize(subG))
+})
+
+disease_results$coip_conductance <- sapply(disease_results$disease, function(i) {
+  genes <- dis_f1[which(dis_f1$disease == i), ]$gene
+  return(get_conductance(dgc_s, genes, Gc))
+})
+
+
+disease_results$y2h_conductance <- sapply(disease_results$disease, function(i) {
+  genes <- dis_f1[which(dis_f1$disease == i), ]$gene
+  return(get_conductance(dgy_s, genes, Gy))
+})
+library(readr)
+write_delim(disease_results, "disease_results.tsv", delim = "\t")
+```

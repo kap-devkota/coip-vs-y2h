@@ -1,0 +1,297 @@
+---
+title: "test1-triadic-closure"
+output: html_document
+date: "2023-07-06"
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library("dplyr")
+# install.packages("igraph")
+library("igraph")
+```
+
+
+## Test 1: Are the Co-IP and Y2H networks structurally similar?
+
+In this test, we try to find out how often does the triadic closure motiff occur in $G_c$ and $G_y$.
+
+
+```{r test1-setup}
+dgc <- read.csv("../data/networks/coip_hc_full.tsv", sep = "\t", header = FALSE)
+dgy <- read.csv("../data/networks/y2h_hc_full.tsv", sep = "\t", header = FALSE)
+
+# Ordering the columns of both Gc and Gy
+
+dgc[which(dgc$V1 > dgc$V2), c("V1", "V2")] <- dgc[which(dgc$V1 > dgc$V2), c("V2", "V1")]
+dgy[which(dgy$V1 > dgy$V2), c("V1", "V2")] <- dgy[which(dgy$V1 > dgy$V2), c("V2", "V1")]
+```
+
+Find $G$ from $G_c$ and $G_y$ by finding all the common nodes and edges between them.
+
+```{r test1-findG}
+dG <- merge(dgc, dgy, by.x = c("V1", "V2"), by.y= c("V1", "V2"), all.x = FALSE, all.y = FALSE)
+dG[c("V1", "V2")]
+```
+
+Compute the actual iGraph $G$.
+
+```{r test1-create-graph}
+G <- graph_from_data_frame(dG[c("V1", "V2")], directed = FALSE) #, vertices = nodesG)
+default_triangles <- length(triangles(G))
+default_triangles
+```
+
+Now, we start the experiment by randomly adding edges in $G$ corresponding to $G_c$ and $G_y$
+
+```{r test1-get-nodes}
+Gnodes <- V(G)$name
+Gcnodes <- union(dgc$V1, dgc$V2)
+Gynodes <- union(dgy$V1, dgy$V2)
+Gcmissing <- setdiff(Gcnodes, Gnodes)
+Gymissing <- setdiff(Gynodes, Gnodes)
+
+# DEBUG
+c(length(Gnodes), length(Gcnodes), length(Gynodes), length(Gcmissing), length(Gymissing))
+
+
+monte_carlo <- function(n_simulations, callback, ...) {
+  simulations <- 1:n_simulations
+  sapply(1:n_simulations, function(x){callback(...)})
+}
+
+# Given the test data-frame, common graph and sampled nodes, return the 
+# length of triangles
+sample_triangles <- function(dfGtest, Gcommon, missing_nodes, no_nodes, no_edges) {
+  sampled_nodes <- sample(missing_nodes, no_nodes)
+  nodestoadd <- union(sampled_nodes, V(Gcommon)$name)
+  edgetoadd  <- dfGtest[which(dfGtest$V1 %in% nodestoadd & dfGtest$V2 %in% nodestoadd), c("V1", "V2")]
+  edgetoadd <- edgetoadd[sample(nrow(edgetoadd), no_edges), ]
+  gtoadd <- graph_from_data_frame(edgetoadd, directed = FALSE)
+  g <- gtoadd %u% Gcommon
+  return(length(triangles(g)))
+}
+```
+
+Now we run tests for different edge and node combinations
+
+```{r test1-run-gc}
+gc_tcounts <- c()
+E <- c(50, 100, 200, 300, 400, 500, 1000)
+K <- c(10, 20, 30, 40, 50, 100)
+n_simulations <- 50
+
+results <- expand.grid(E, K)
+colnames(results) <- c("Edges", "Nodes")
+results$pvalues <- apply(results, MARGIN=1, function(a) {
+  e <- a[1]
+  k <- a[2]
+  gc_counts <- monte_carlo(n_simulations, sample_triangles, 
+                           dgc, G, Gcmissing, k, e)
+  gy_counts <- monte_carlo(n_simulations, sample_triangles, 
+                           dgy, G, Gymissing, k, e)
+  res <- t.test(gc_counts, gy_counts)
+  return(res$p.value)
+})
+
+write.table(results, "test1-results.tsv", sep = "\t", row.names = FALSE)
+results
+```
+
+Seeing the results for different Edge and Node combinations, even after applying multiple testing correction (Bonnoferoni), the alternate hypothesis is still accepted for all edges and nodes combinations.
+
+```{r test1-present-test1}
+library(ggplot2)
+library(dplyr)
+library(readr)
+library(latex2exp)
+
+install.packages("latex2exp")
+
+results
+results <- read_delim("test1-results.tsv", delim = "\t")
+results$Nodes <- as.factor(results$Nodes)
+
+ggplot(results, aes(x=`Edges`, y = log(`pvalues`), color = `Nodes`)) +
+  geom_line() + 
+  scale_x_continuous(expand=c(0, 0), limits=c(50, 1000)) +
+  scale_y_continuous(expand=c(0, 0), limits=c(-130, 10)) +
+  ylab(TeX("$\\log(p$-$values)$")) +
+  geom_hline(yintercept = log(0.05/42), size = 0.4, linetype = "dashed") +
+  geom_text(mapping=aes(y = log(0.05/42)+5, x=500, label="Bonferroni updated log(alpha) = -6.77"), color = "black", size=3) +
+  theme(text=element_text(size=20))
+ggsave("test1-p-val.png", plot = last_plot())
+log(0.05/42)
+```
+
+
+
+## Results after removing the most referenced genes in the analysis of Triadic closure
+
+```{r get-the-most-ref-genes}
+library(org.Hs.eg.db)
+library(dplyr)
+library(AnnotationDbi)
+N_GENES_TO_IGNORE <- 1000
+
+get_uniprot <- function(symbols){
+  geneset <- AnnotationDbi::select(org.Hs.eg.db, columns=c("SYMBOL", "UNIPROT"), keys=symbols, keytype="SYMBOL")$UNIPROT
+  return(sapply(geneset, function(x){return(paste("uniprotkb:", x, sep = ""))}))
+}
+
+pubcounts <- read.csv("../data/pubmed_counts.tsv", header=TRUE, sep="\t")
+
+genes_to_ignore <- get_uniprot(pubcounts$Symbol[1:N_GENES_TO_IGNORE])
+```
+
+Now, ignore the `genes_to_ignore` and do the same operations as above
+
+In this test, we try to find out how often does the triadic closure motiff occur in $G_c$ and $G_y$.
+
+
+```{r test1-setup}
+dgc <- read.csv("../data/networks/coip_hc_full.tsv", sep = "\t", header = FALSE)
+dgy <- read.csv("../data/networks/y2h_hc_full.tsv", sep = "\t", header = FALSE)
+
+# Ordering the columns of both Gc and Gy
+
+dgc[which(dgc$V1 > dgc$V2), c("V1", "V2")] <- dgc[which(dgc$V1 > dgc$V2), c("V2", "V1")]
+dgy[which(dgy$V1 > dgy$V2), c("V1", "V2")] <- dgy[which(dgy$V1 > dgy$V2), c("V2", "V1")]
+
+
+# ignoring highly referenced genes
+dgc <- dgc[which(!(dgc$V1 %in% genes_to_ignore) & !(dgc$V2 %in% genes_to_ignore)), ]
+dgy <- dgy[which(!(dgy$V1 %in% genes_to_ignore) & !(dgy$V2 %in% genes_to_ignore)), ]
+```
+
+Find $G$ from $G_c$ and $G_y$ by finding all the common nodes and edges between them.
+
+```{r test1-findG}
+dG <- merge(dgc, dgy, by.x = c("V1", "V2"), by.y= c("V1", "V2"), all.x = FALSE, all.y = FALSE)
+dG[c("V1", "V2")]
+```
+
+
+Now, we start the experiment by randomly adding edges in $G$ corresponding to $G_c$ and $G_y$
+
+```{r test1-get-nodes}
+Gnodes <- V(G)$name
+Gcnodes <- union(dgc$V1, dgc$V2)
+Gynodes <- union(dgy$V1, dgy$V2)
+Gcmissing <- setdiff(Gcnodes, Gnodes)
+Gymissing <- setdiff(Gynodes, Gnodes)
+
+# DEBUG
+c(length(Gnodes), length(Gcnodes), length(Gynodes), length(Gcmissing), length(Gymissing))
+
+
+monte_carlo <- function(n_simulations, callback, ...) {
+  simulations <- 1:n_simulations
+  sapply(1:n_simulations, function(x){callback(...)})
+}
+
+# Given the test data-frame, common graph and sampled nodes, return the 
+# length of triangles
+sample_triangles <- function(dfGtest, Gcommon, missing_nodes, no_nodes, no_edges) {
+  sampled_nodes <- sample(missing_nodes, no_nodes)
+  nodestoadd <- union(sampled_nodes, V(Gcommon)$name)
+  edgetoadd  <- dfGtest[which(dfGtest$V1 %in% nodestoadd & dfGtest$V2 %in% nodestoadd), c("V1", "V2")]
+  edgetoadd <- edgetoadd[sample(nrow(edgetoadd), no_edges), ]
+  gtoadd <- graph_from_data_frame(edgetoadd, directed = FALSE)
+  g <- gtoadd %u% Gcommon
+  return(length(triangles(g)))
+}
+```
+
+Now we run tests for different edge and node combinations
+
+```{r test1-run-gc}
+gc_tcounts <- c()
+E <- c(50, 100, 200, 300, 400, 500, 1000)
+K <- c(10, 20, 30, 40, 50, 100)
+n_simulations <- 50
+
+results <- expand.grid(E, K)
+colnames(results) <- c("Edges", "Nodes")
+results$pvalues <- apply(results, MARGIN=1, function(a) {
+  e <- a[1]
+  k <- a[2]
+  gc_counts <- monte_carlo(n_simulations, sample_triangles, 
+                           dgc, G, Gcmissing, k, e)
+  gy_counts <- monte_carlo(n_simulations, sample_triangles, 
+                           dgy, G, Gymissing, k, e)
+  res <- t.test(gc_counts, gy_counts)
+  return(res$p.value)
+})
+
+# write.table(results, "test1-results-removing-referenced-genes.tsv", sep = "\t", row.names = FALSE)
+results
+write.table(results, "test1-results-removing-referenced-genes-1000.tsv", sep = "\t", row.names = FALSE)
+```
+
+
+
+## How similar is Y2H network with HuRI on intersecting nodes?
+
+```{r huri-vs-y2h}
+require('biomaRt')
+library(data.table)
+
+# get the dataset from biomart
+mart <- useMart('ENSEMBL_MART_ENSEMBL')
+mart <- useDataset('hsapiens_gene_ensembl', mart)
+
+annotLookup <- getBM(
+  mart = mart,
+  attributes = c(
+    "ensembl_gene_id",
+    "gene_biotype",
+    "external_gene_name",
+    "uniprot_gn_symbol",
+    "uniprot_gn_id"),
+  uniqueRows = TRUE)
+
+annotLookup <- subset(annotLookup, uniprot_gn_symbol !="")
+annotLookup <- annotLookup[c("ensembl_gene_id", "uniprot_gn_id")]
+annotDataset <- annotLookup
+annotDataset$uniprot_gn_id <- sapply(annotDataset$uniprot_gn_id, function(x){return(paste("uniprotkb:", x, sep = ""))})
+annotDataset
+annotDataset %>%
+  group_by(uniprot_gn_id) %>%
+  summarise(counts=length(ensembl_gene_id)) %>%
+  arrange(desc(counts))
+
+
+huri <- read.csv("../data/networks/HuRI.tsv", sep = "\t", header = FALSE)
+huri[which(huri$V1 > huri$V2), c("V1", "V2")] <- huri[which(huri$V1 > huri$V2), c("V2", "V1")] 
+
+y2h <- read.csv("../data/networks/y2h_hc_full.tsv", sep = "\t", header = FALSE)
+y2h <- y2h[c("V1", "V2")]
+y2h
+
+y2hnodes <- union(y2h$V1, y2h$V2)
+hurinodes <- union(huri$V1, huri$V2, by=c("V1"="ensembl_gene_id"))
+
+common <- intersect(y2hnodes, hurinodes)
+c(length(y2hnodes), length(hurinodes), length(common))
+
+
+out <- do.call(rbind, apply(y2h, 1, function(x) {
+  x1 <- x[["V1"]]
+  x2 <- x[["V2"]]
+  
+  x1uprot <- annotDataset[which(annotDataset$uniprot_gn_id == x1), "ensembl_gene_id"]
+  x2uprot <- annotDataset[which(annotDataset$uniprot_gn_id == x2), "ensembl_gene_id"]
+  
+  comb <- CJ(V1=x1uprot, V2=x2uprot)
+  comb[which(comb$V1 > comb$V2), c("V1", "V2")] <- comb[which(comb$V1 > comb$V2), c("V2", "V1")] 
+  
+  out <- inner_join(huri, comb, by=c("V1", "V2"))
+  
+  return(out)
+}))
+
+outud <- out[!duplicated(out), ]
+c(dim(outud), dim(huri))
+dim(outud)[1] / dim(huri)[1]
+```

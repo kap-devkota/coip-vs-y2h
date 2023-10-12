@@ -1,0 +1,205 @@
+---
+title: "test4-kinase-phosphatase"
+output: html_document
+date: "2023-07-07"
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+
+## Test 4: How does the CoIP and Y2H network represent signalling relationships?
+
+This is done by finding out how different networks respond to 
+
+```{r test4getdata, include=TRUE, echo=TRUE}
+library(hgnc)
+library(org.Hs.eg.db)
+# Function to get the UNIPROTKB id from gene symbol
+get_uniprot <- function(gset, commonprots){
+  geneset <- AnnotationDbi::select(org.Hs.eg.db, columns=c("SYMBOL", "UNIPROT"), keys=gset, keytype="SYMBOL")$UNIPROT
+  geneset <- sapply(geneset, function(i) {return(paste("uniprotkb:", i, sep=""))})
+  return(intersect(geneset, commonprots))
+}
+
+url <- latest_archive_url()
+download_archive(url=latest_archive_url(),
+                 path = getwd(),
+                 filename = basename(url))
+
+
+# Loading graphs
+dgc <- read.csv("../data/networks/coip_hc_full.tsv", sep = "\t", header = FALSE)
+dgy <- read.csv("../data/networks/y2h_hc_full.tsv", sep = "\t", header = FALSE)
+
+# Ordering the columns of both Gc and Gy
+
+dgc[which(dgc$V1 > dgc$V2), c("V1", "V2")] <- dgc[which(dgc$V1 > dgc$V2), c("V2", "V1")]
+dgy[which(dgy$V1 > dgy$V2), c("V1", "V2")] <- dgy[which(dgy$V1 > dgy$V2), c("V2", "V1")]
+
+gcnodes <- union(dgc[[1]], dgc[[2]])
+gynodes <- union(dgy[[1]], dgy[[2]])
+
+gcommon <- intersect(gcnodes, gynodes)
+dgc_s <- dgc[which(dgc[[1]] %in% gcommon & dgc[[2]] %in% gcommon), ]
+dgy_s <- dgy[which(dgy[[1]] %in% gcommon & dgy[[2]] %in% gcommon), ]
+
+gcommon <- intersect(union(dgy_s$V1, dgy_s$V2), union(dgc_s$V1, dgc_s$V2))
+
+Gc <- graph.data.frame(dgc_s, directed=FALSE)
+Gy <- graph.data.frame(dgy_s, directed=FALSE)
+```
+
+
+Now, get kinases and proteases
+
+```{r test4-getkinases}
+library(igraph)
+proteinsdf <- read.delim("hgnc_complete_set.txt", sep = "\t")
+# proteases <- proteinsdf[which(sapply(proteinsdf$gene_group, function(i){grepl("protease", i, fixed = TRUE)})), ]
+phosphatases <- proteinsdf[which(sapply(proteinsdf$gene_group, function(i){grepl("phosphatase", i, fixed = TRUE)})), ]
+kinases <- proteinsdf[which(sapply(proteinsdf$gene_group, function(i){grepl("kinase", i, fixed = TRUE)})), ]
+pprots <- get_uniprot(phosphatases$symbol, gcommon)
+kprots <- get_uniprot(kinases$symbol, gcommon)
+
+phosphatases
+
+kinases
+
+get_conductance <- function(dg, nodes, G = NULL) {
+  if (is.null(G)) {
+    G <- graph.data.frame(dg, directed = FALSE)
+  }
+  vol <- sum(igraph::degree(G)[nodes])
+  vol1 <- sum(igraph::degree(G)[sapply(V(G)$name, function(i){return(!(i %in% nodes))})])
+  if(vol1 < vol) {
+    vol <- vol1
+  }
+  dg_n <- dg[which(dg$V1 %in% nodes | dg$V2 %in% nodes), ]
+  dg_n <- dg_n[which(!(dg$V1 %in% nodes & dg$V2 %in% nodes)), ]
+  return(length(dg_n)/vol)
+}
+
+
+simulate_conductance <- function(dg, n_nodes, n_experiments = 100, G = NULL) {
+  if (is.null(G)) {
+    G <- graph.data.frame(dg, directed = FALSE)
+  }
+  conductances <- sapply(1:n_experiments, function(i) {
+    nodes <- sample(V(G)$name, n_nodes)
+    return(get_conductance(dg, nodes, G))
+  })
+  return(conductances)
+}
+
+get_conductance(dgc_s, kprots, Gc)
+
+sim_kinase <- simulate_conductance(dgy_s, length(kprots))
+c(mean(sim_kinase), sd(sim_kinase))
+
+
+```
+
+Now, we do the operation for kinase and protease
+```{r test4-kinase}
+ck_coip <- get_conductance(dgc_s, kprots, Gc)
+ck_y2h <- get_conductance(dgy_s, kprots, Gy)
+
+cksim_coip <- simulate_conductance(dgc_s, length(kprots), G = Gc)
+cksim_y2h <- simulate_conductance(dgy_s, length(kprots), G = Gy)
+
+cp_coip <- get_conductance(dgc_s, pprots, Gc)
+cp_y2h <- get_conductance(dgy_s, pprots, Gy)
+
+cpsim_coip <- simulate_conductance(dgc_s, length(pprots), G = Gc)
+cpsim_y2h <- simulate_conductance(dgy_s, length(pprots), G = Gy)
+
+
+
+outputs <- data.frame(geneset_type = c("kinase", "phosphatase"),
+                      prot_sizes = c(length(kprots), length(pprots)),
+                      coip_conductance = c(ck_coip, cp_coip),
+                      y2h_conductance = c(ck_y2h, cp_y2h),
+                      simulation_no = c(100, 100),
+                      simulated_coip_conductance_mean = c(mean(cksim_coip), mean(cpsim_coip)),
+                      simulated_y2h_conductance_mean = c(mean(cksim_y2h), mean(cpsim_y2h)),
+                      simulated_coip_conductance_sd = c(sd(cksim_coip), sd(cpsim_coip)),
+                      simulated_y2h_conductance_sd = c(sd(cksim_y2h), sd(cpsim_y2h))
+                      )
+                      
+
+t(outputs)
+```
+
+
+## Plot the outputs
+```{r test4-plot}
+library(ggplot2)
+library(tidyr)
+library(ggpubr)
+kinase_all <- data.frame(`Co-IP` = cksim_coip, `Y2H` = cksim_y2h)
+phosphatase_all <- data.frame(`Co-IP` = cpsim_coip, `Y2H` = cpsim_y2h)
+
+colnames(kinase_all) <- c("Co-IP(shared)", "Y2H(shared)")
+colnames(phosphatase_all) <- c("Co-IP(shared)", "Y2H(shared)")
+
+kmelt <- kinase_all %>% gather(key = "Network Type", value = "Conductance")
+pmelt <- phosphatase_all %>% gather(key = "Network Type", value = "Conductance")
+
+kmelt$`Network Type` <- as.factor(kmelt$`Network Type`)
+pmelt$`Network Type` <- as.factor(pmelt$`Network Type`)
+
+kmelt
+pmelt
+
+kinasepred <- data.frame(`Network Type` = as.factor(c("Co-IP(shared)", "Y2H(shared)")),
+                               `Conductance`  = c(ck_coip, ck_y2h))
+colnames(kinasepred) <- c("Network Type", "Conductance")
+kinasepred
+
+phosphatasepred <- data.frame(`Network Type` = as.factor(c("Co-IP(shared)", "Y2H(shared)")),
+                               `Conductance`  = c(cp_coip, cp_y2h))
+colnames(phosphatasepred) <- c("Network Type", "Conductance")
+phosphatasepred
+
+
+kinasegg <- ggplot(kmelt, mapping = aes(x =`Network Type`, y = Conductance)) +
+  geom_boxplot(width = 0.2, outlier.shape = NA, fill = "gray") +
+  geom_point(data = kinasepred,
+             mapping = aes(x=`Network Type`, y = `Conductance`), shape = 17, size = 7) + ggtitle("Kinase") + theme(text = element_text(size = 20), plot.title = element_text(hjust = 0.5))
+kinasegg  
+
+
+phosphatasegg <- ggplot(pmelt, mapping = aes(x =`Network Type`, y = Conductance)) +
+  geom_boxplot(width = 0.2, outlier.shape = NA, fill = "gray") +
+  geom_point(data = phosphatasepred,
+             mapping = aes(x=`Network Type`, y = `Conductance`), shape = 17, size = 7) + ggtitle("Phosphatase") + theme(text = element_text(size = 20), plot.title = element_text(hjust = 0.5)) 
+phosphatasegg
+
+plot <- ggarrange(kinasegg, phosphatasegg, common.legend = TRUE)
+annotate_figure(plot, top = text_grob("Actual conductance (     ) vs boostrap baseline (boxplot)", size = 25))
+coip_all
+ggsave("test4-kinase-phosphatase-boxplot.png", plot = last_plot(), width = 12, height = 5)
+```
+
+
+```{r test4-plot}
+kinase_coip <- 0.00145087
+kinase_y2h <- 0.003484321
+kinase_coip_mean <- 0.002430194
+kinase_y2h_mean <- 0.002699081
+kinase_coip_sd <- 0.0003154412
+kinase_y2h_sd <- 0.0003315783
+
+phosphatase_coip <- 0.002230483
+phosphatase_y2h <- 0.003685504
+phosphatase_coip_mean <- 0.002674915
+phosphatase_y2h_mean <- 0.002981000
+phosphatase_coip_sd <- 0.0003153384
+phosphatase_y2h_sd <- 0.0004253304
+
+kinasedf = data.frame(kina)
+```
+
+

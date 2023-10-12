@@ -1,2 +1,5 @@
 data/
 !data/**/*.tsv
+r-analysis/gene_info
+r-analysis/gene2pubmed
+**/.ipynb_checkpoints/*

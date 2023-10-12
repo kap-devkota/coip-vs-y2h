@@ -1,0 +1,247 @@
+---
+title: "visualizing_results"
+output: html_document
+date: "2023-08-21"
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## Visualization of the Link Prediction results
+
+1. Read the link prediction file
+```{r read-lp-file}
+library(readr)
+lpres <- read_delim("../results/link_prediction_different_methods.tsv", delim = "\t")
+lpres
+```
+
+
+2. Processing/Filtering
+```{r fig.width=14,fig.height=8}
+library(ggplot2)
+library(dplyr)
+library(ggpubr)
+
+lpres$networks <- sapply(lpres$networks, function(i) {
+  return(gsub("_h
+lpresc_", "-", i))
+})
+
+summarizedlp <- lpres %>% group_by(networks, methods, metric) %>% summarize(`score-mean` = mean(score), 
+                                                            `score-sd` = sd(score))
+
+group.colors <- c(cw_normalized="#3FD3FF", 
+                  l3="blue",
+                  dsd_normalized="#FFFD27",
+                  dsd_unnormalized="#FFCE46",
+                  glide_cw_n="#FF0061",
+                  glide_cw_u="#FF5E44",
+                  glide_l3_n="#FFBD80",
+                  glide_l3_u="#FF8652"
+                  )
+summarizedlp$methods <- factor(summarizedlp$methods, levels=c("cw_normalized",
+                                                              "l3",
+                                                              "dsd_normalized",
+                                                              "dsd_unnormalized",
+                                                              "glide_cw_n",
+                                                              "glide_cw_u",
+                                                              "glide_l3_n",
+                                                              "glide_l3_u"))
+paupr <- ggplot(summarizedlp[which(summarizedlp$metric== "AUPR"), ], aes(x=networks, y=`score-mean`, fill = `methods`)) +
+  geom_col(width=0.8, color="black",
+           position = position_dodge(0.8), show.legend = FALSE) + 
+  geom_errorbar(aes(ymin=`score-mean` - `score-sd`, ymax=`score-mean` + `score-sd`), width=.2,
+                position=position_dodge(0.8)) + 
+  scale_fill_manual(values=group.colors) + ggtitle("AUPR results") + theme(plot.title = element_text(hjust = 0.5))
+
+
+pauc <- ggplot(summarizedlp[which(summarizedlp$metric== "ROC"), ], aes(x=networks, y=`score-mean`, fill = `methods`)) +
+  geom_col(width=0.8, color="black",
+           position = position_dodge(0.8)) + 
+  geom_errorbar(aes(ymin=`score-mean` - `score-sd`, ymax=`score-mean` + `score-sd`), width=.2,
+                position=position_dodge(0.8)) + 
+  scale_fill_manual(values=group.colors) + ggtitle("AUROC results") + theme(plot.title = element_text(hjust = 0.5))
+
+pauc
+ggarrange(paupr, pauc, ncol=2, widths = c(1, 1), heights = c(1, 1), common.legend = TRUE)
+ggsave("link_prediction_results_all.png", plot = last_plot(), width = 16, height =8)
+paupr
+```
+
+
+
+3. Smaller version of the figure
+```{r smallerversion}
+summarizedlplim <- summarizedlp %>% filter(methods %in% c("cw_normalized", "l3", "glide_l3_n"))
+summarizedlplim
+network <- c("coip_hc_full" = "Co-IP",
+          "y2h_hc_full" = "Y2H",
+          "coip_hc_shared" = "Co-IP(shared)",
+          "y2h_hc_shared" = "Y2H(shared)")
+
+
+method <- c("cw_normalized" = "CWN",
+             "l3" = "L3",
+             "glide_l3_n" = "GLIDE(L3, N)")
+method["glide_l3_n"]
+
+summarizedlplim$networks <- sapply(summarizedlplim$networks, function(i) {
+    return(unname(network[i]))
+})
+summarizedlplim$methods <- sapply(summarizedlplim$methods, function(i) {
+  return(unname(method[as.character(i)]))
+})
+
+grouplim.colors <- c(CWN="#3FD3FF", 
+                  L3="blue",
+                  `GLIDE(L3, N)`="#FFBD80"
+                  )
+summarizedlplim$methods <- factor(summarizedlplim$methods, levels = c("CWN",
+                                                                      "L3",
+                                                                      "GLIDE(L3, N)"))
+paupr <- ggplot(summarizedlplim[which(summarizedlplim$metric== "AUPR"), ], aes(x=networks, y=`score-mean`, fill = `methods`)) +
+  geom_col(width=0.8, color="black",
+           position = position_dodge(0.8), show.legend = FALSE) + 
+  geom_errorbar(aes(ymin=`score-mean` - `score-sd`, ymax=`score-mean` + `score-sd`), width=.2,
+                position=position_dodge(0.8)) + 
+  scale_fill_manual(values=grouplim.colors) + ggtitle("AUPR results") +
+  theme(text = element_text(size=20), plot.title = element_text(hjust = 0.5))
+
+pauc <- ggplot(summarizedlplim[which(summarizedlplim$metric== "ROC"), ], aes(x=networks, y=`score-mean`, fill = `methods`)) +
+  geom_col(width=0.8, color="black", position = position_dodge(0.8)
+           ) + 
+  geom_errorbar(aes(ymin=`score-mean` - `score-sd`, ymax=`score-mean` + `score-sd`), width=.2,
+                position=position_dodge(0.8)) + 
+  scale_fill_manual(values=grouplim.colors) + ggtitle("AUROC results") + theme(text = element_text(size=20), plot.title = element_text(hjust = 0.5))
+
+
+ggarrange(paupr, pauc, ncol=2, widths = c(1, 1), heights = c(1, 1), common.legend = TRUE)
+ggsave("link_prediction_results_short.png", plot = last_plot(), width = 16, height =8)
+```
+
+
+## Check for degree distribution
+
+1. Get the data
+```{r degreedata}
+library(purrr)
+
+dfmv <- read_delim("../notebooks/data+results/func_pred_degree_analysis_mv.tsv", delim = "\t")
+dfl3 <- read_delim("../notebooks/data+results/func_pred_degree_analysis_l3.tsv", delim = "\t")
+
+dfmv50 <- dfmv %>% filter(k == 50)
+dfl350 <- dfl3 %>% filter(k == 50)
+ 
+net.map <- c("Shared-Y2H" = "Y2H(Shared)",
+             "Shared-CoIP" = "Co-IP(Shared)")
+
+dfmv50$Network <- sapply(dfmv50$Network, function(i) {
+  return(unname(net.map[i]))
+})
+dfl350$Network <- sapply(dfl350$Network, function(i) {
+  return(unname(net.map[i]))
+})
+dfmv50$`Test Degree Threshold` <- as.factor(dfmv50$`Test Degree Threshold`)
+dfmv50$`Train Degree Threshold` <- as.factor(dfmv50$`Train Degree Threshold`)
+
+dfmv50acc <- dfmv50 %>% filter(Metric == "Accuracy")
+dfl350acc <- dfl350 %>% filter(Metric == "Accuracy")
+dfmv50accdiff <- dfmv50acc %>% group_by(`GO-type`, `Test Degree Threshold`, `Train Degree Threshold`) %>% summarize(`Acc(Co-IP) - Acc(Y2H)` = (`Score-Avg`[Network == "Co-IP(Shared)"] - `Score-Avg`[Network == "Y2H(Shared)"]))
+
+dfl350accdiff <- dfl350acc %>% group_by(`GO-type`, `Test Degree Threshold`, `Train Degree Threshold`) %>% summarize(`Acc(Co-IP) - Acc(Y2H)` = (`Score-Avg`[Network == "Co-IP(Shared)"] - `Score-Avg`[Network == "Y2H(Shared)"]))
+
+dfl350accdiff$`Test Degree Threshold` <- as.factor(dfmv50accdiff$`Test Degree Threshold`)
+dfl350accdiff$`Train Degree Threshold` <- as.factor(dfmv50accdiff$`Train Degree Threshold`)
+
+plots <- lapply(c("MF", "BP", "CC"), function(i) {ggplot(dfmv50accdiff %>% filter(`GO-type` == i), aes(x = `Train Degree Threshold`, y = `Test Degree Threshold`,
+                   fill = `Acc(Co-IP) - Acc(Y2H)`)) + 
+  geom_tile() +
+    scale_fill_gradient2(limits=c(-0.15, 0.15),low = "#FF0000",
+                       mid = "#FFFFCC",
+                       high = "#065AFF" )  + ggtitle(sprintf("CW-%s", i)) + theme(text = element_text(size=20), plot.title = element_text(hjust = 0.5), legend.spacing.x=unit(1.0, 'cm')) + rremove("xlab") + rremove("ylab")}) 
+
+plotsl3 <- lapply(c("MF", "BP", "CC"), function(i) {ggplot(dfl350accdiff %>% filter(`GO-type` == i), aes(x = `Train Degree Threshold`, y = `Test Degree Threshold`,
+                   fill = `Acc(Co-IP) - Acc(Y2H)`)) + 
+  geom_tile() +
+    scale_fill_gradient2(limits=c(-0.15, 0.15),
+                       low = "#FF0000",
+                       mid = "#FFFFCC",
+                       high = "#065AFF" ) + ggtitle(sprintf("L3-%s", i)) + theme(text = element_text(size=20), plot.title = element_text(hjust = 0.5), legend.spacing.x=unit(1.0, 'cm'))+ rremove("xlab") + rremove("ylab")}) 
+
+final_fig <- do.call(partial(ggarrange, ncol=3, nrow=2, widths=c(1,1,1), heights=c(1,1),
+                common.legend = TRUE, legend = "right"), c(plots, plotsl3))
+
+final_fig
+
+annotate_figure(final_fig, 
+                left= text_grob("Test Degree Threshold", size = 20, rot = 90), 
+                bottom= text_grob("Train Degree Threshold", size = 20, hjust = 0.9))
+ggsave("function_heatmap.png", plot = last_plot(), width = 16, height =10)
+
+plotsl3
+
+"BP" == "BP" 
+
+x <- list(x="1", y = "2")
+y <- list(x1 = "2", z1 = "3")
+c(x, y)
+dfmv50
+```
+
+
+3. Get the necessary stats
+```{r stats}
+summarizedlp %>% filter(methods %in% c("l3", "cw_normalized") & metric == "AUPR") %>% group_by(networks) %>%
+    mutate(l3_over_cw = `score-mean`[which(methods == "l3")] / `score-mean`[which(methods == "cw_normalized")]) %>%# / `score-mean`["methods" == "cw_normalized"][1]) %>% 
+  ungroup()
+summarizedlp %>% group_by(networks, metric) %>% filter(`score-mean` == max(`score-mean`))
+summarizedlp[which(summarizedlp$methods == "l3"), ]
+```
+
+
+
+
+## Check for random overlap
+```{r check-overlap}
+library(dplyr)
+dgc <- read.csv("../data/networks/coip_hc_full.tsv", sep = "\t", header = FALSE)
+dgy <- read.csv("../data/networks/y2h_hc_full.tsv", sep = "\t", header = FALSE)
+
+# Ordering the columns of both Gc and Gy
+
+dgc[which(dgc$V1 > dgc$V2), c("V1", "V2")] <- dgc[which(dgc$V1 > dgc$V2), c("V2", "V1")]
+dgy[which(dgy$V1 > dgy$V2), c("V1", "V2")] <- dgy[which(dgy$V1 > dgy$V2), c("V2", "V1")]
+
+
+gcnodes <- union(dgc[[1]], dgc[[2]])
+gynodes <- union(dgy[[1]], dgy[[2]])
+
+gcommon <- intersect(gcnodes, gynodes)
+dgc_s <- dgc[which(dgc[[1]] %in% gcommon & dgc[[2]] %in% gcommon), ]
+dgy_s <- dgy[which(dgy[[1]] %in% gcommon & dgy[[2]] %in% gcommon), ]
+
+gcommon <- intersect(union(dgy_s$V1, dgy_s$V2), union(dgc_s$V1, dgc_s$V2))
+
+sample1 <- dim(dgc_s)[1]
+sample2 <- dim(dgy_s)[1]
+
+construct_sample <- function(nodes, no_edges) {
+  sample <- as.data.frame(do.call(rbind, lapply(1:as.integer(no_edges*1.5), function(i) {return(sample(gcommon, 2, replace=2))})))
+  sample[which(sample$V1 > sample$V2), c("V1", "V2")] <- sample[which(sample$V1 > sample$V2), c("V2", "V1")]
+  sample <- sample[which(sample$V1 != sample$V2), ]
+  return(unique(sample)[1:no_edges, ])
+}
+
+nruns <- 100
+run_sim <- sapply(1:nruns, function(i){
+    s1 <- construct_sample(gcommon, sample1)
+    s2 <- construct_sample(gcommon, sample2)
+    union <- dim(unique(rbind(s1, s2)))[1]
+    int <- dim(inner_join(s1, s2, by=c("V1", "V2")))[1]
+    return(int / union)
+  })
+
+c(mean(run_sim), sd(run_sim))
+```

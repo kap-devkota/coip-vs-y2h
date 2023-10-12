@@ -1,0 +1,230 @@
+---
+title: "test3-msigdb-kegg"
+output: html_document
+date: "2023-07-07"
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+
+## Test 3: 
+
+The Test 3 shows how the local structure of CoIP and Y2H networks capture functionally similar proteins. For this, we use the 
+MSigDB database
+
+```{r test3-install-msigdb}
+## Use these codes to install msigdb
+# install.packages("BiocManager")
+#BiocManager::install("msigdb")
+# browseVignettes("msigdb")
+print("Msigdb installed!")
+```
+
+
+```{r test3-imports}
+library(msigdb)
+library(ExperimentHub)
+library(GSEABase)
+library(org.Hs.eg.db)
+library(dplyr)
+library(AnnotationDbi)
+library(igraph)
+
+INTERSECTING_THRESHOLD=10
+
+msigdb.hs <- getMsigdb(org="hs", id="SYM", version='7.5')
+msigdb.hs <- appendKEGG(msigdb.hs)
+
+keggdb <- msigdb.hs[sapply(msigdb.hs, function(i){return(grepl("KEGG", setName(i), fixed = TRUE))})]
+
+get_uniprot <- function(gset, commonprots){
+  geneset <- AnnotationDbi::select(org.Hs.eg.db, columns=c("SYMBOL", "UNIPROT"), keys=geneIds(gset), keytype="SYMBOL")$UNIPROT
+  geneset <- sapply(geneset, function(i) {return(paste("uniprotkb:", i, sep=""))})
+  return(intersect(geneset, commonprots))
+}
+
+
+get_conductance <- function(dg, nodes, G = NULL) {
+  if (is.null(G)) {
+    G <- graph.data.frame(dg, directed = FALSE)
+  }
+  vol <- sum(igraph::degree(G)[nodes])
+  vol1 <- sum(igraph::degree(G)[sapply(V(G)$name, function(i){return(!(i %in% nodes))})])
+  if(vol1 < vol) {
+    vol <- vol1
+  }
+  dg_n <- dg[which(dg$V1 %in% nodes | dg$V2 %in% nodes), ]
+  dg_n <- dg_n[which(!(dg$V1 %in% nodes & dg$V2 %in% nodes)), ]
+  return(length(dg_n)/vol)
+}
+
+
+simulate_conductance <- function(dg, n_nodes, n_experiments = 100, G = NULL) {
+  if (is.null(G)) {
+    G <- graph.data.frame(dg, directed = FALSE)
+  }
+  conductances <- sapply(1:n_experiments, function(i) {
+    nodes <- sample(V(G)$name, n_nodes)
+    return(get_conductance(dg, nodes, G))
+  })
+  return(conductances)
+}
+
+
+# Loading graphs
+dgc <- read.csv("../data/networks/coip_hc_full.tsv", sep = "\t", header = FALSE)
+dgy <- read.csv("../data/networks/y2h_hc_full.tsv", sep = "\t", header = FALSE)
+
+# Ordering the columns of both Gc and Gy
+
+dgc[which(dgc$V1 > dgc$V2), c("V1", "V2")] <- dgc[which(dgc$V1 > dgc$V2), c("V2", "V1")]
+dgy[which(dgy$V1 > dgy$V2), c("V1", "V2")] <- dgy[which(dgy$V1 > dgy$V2), c("V2", "V1")]
+
+gcnodes <- union(dgc[[1]], dgc[[2]])
+gynodes <- union(dgy[[1]], dgy[[2]])
+
+gcommon <- intersect(gcnodes, gynodes)
+dgc_s <- dgc[which(dgc[[1]] %in% gcommon & dgc[[2]] %in% gcommon), ]
+dgy_s <- dgy[which(dgy[[1]] %in% gcommon & dgy[[2]] %in% gcommon), ]
+
+gcommon <- intersect(union(dgy_s$V1, dgy_s$V2), union(dgc_s$V1, dgc_s$V2))
+
+Gc <- graph.data.frame(dgc_s, directed=FALSE)
+Gy <- graph.data.frame(dgy_s, directed=FALSE)
+df <- data.frame(keggname = sapply(keggdb, function(i){setName(i)})) 
+df$intersecting_nodes<-sapply(keggdb, function(i) {length(get_uniprot(i, gcommon))})
+filtered_kegg <- keggdb[sapply(df$intersecting_nodes, function(i) {i >= INTERSECTING_THRESHOLD})]
+length(filtered_kegg)
+length(keggdb)
+
+df <- df[which(df$intersecting_nodes >= INTERSECTING_THRESHOLD), ]
+df$coip_edges <- sapply(filtered_kegg, function(i){
+  commonnodes <- get_uniprot(i, gcommon)
+  subG <- subgraph(Gc, commonnodes)
+  return(gsize(subG))
+})
+
+df$y2h_edges <- sapply(filtered_kegg, function(i){
+  commonnodes <- get_uniprot(i, gcommon)
+  subG <- subgraph(Gy, commonnodes)
+  return(gsize(subG))
+})
+
+df$coip_conductance <- sapply(filtered_kegg, function(i){
+  commonnodes <- get_uniprot(i, gcommon)
+  return(get_conductance(dgc_s, commonnodes, Gc))
+})
+
+df$y2h_conductance <- sapply(filtered_kegg, function(i){
+  commonnodes <- get_uniprot(i, gcommon)
+  return(get_conductance(dgy_s, commonnodes, Gy))
+})
+
+
+write_delim(df, "test3-msigdb-kegg-conductance.tsv", delim = "\t")
+```
+
+Plot the `df` edge results
+```{r test-3-plot-results-conductance}
+library(ggplot2)
+library(reshape2)
+library(dplyr)
+library(ggrepel)
+library(svglite)
+
+df <- read_delim("test3-msigdb-kegg-conductance.tsv", delim = "\t")
+df
+
+dfgg <- melt(df[c("keggname", "intersecting_nodes", "coip_edges", "y2h_edges")], id=c("keggname", "intersecting_nodes"))
+
+colnames(dfgg) <- c("KEGG name", "Num. of Intersecting Nodes", "Net. Type", "Num. of Edges")
+
+dflargestcoips <- df %>%
+  arrange(desc(coip_edges)) %>%
+  head(8)
+
+dflargestcoips$keggname <- c("Cancer", "MAPK signalling", "Spliceosome",
+                             "Cell cycle", "Neurotrophin signalling", "Focal adhesion",
+                             "Prostate cancer", "Proteasome")
+                            # , "ERBB signalling", "Endocytosis", "T cell receptor signalling", "Chemokine signalling", "Insulin signalling", "Chronic myeloid", "Actin cytoskeleton")
+
+dflargestcoips$groups = 1:8
+dflargestcoips
+
+dflargestcoipsgg <- melt(dflargestcoips, id=c("keggname", "intersecting_nodes", "groups"))
+dflargestcoipsgg
+colnames(dflargestcoipsgg) <- c("KEGG name", "Num. of Intersecting Nodes","groups", "Net. Type", "Num. of Edges")
+
+dflargestcoipsgg <- dflargestcoipsgg[sapply(dflargestcoipsgg$`Net. Type`, function(i){return(grepl("edges", i))}
+                              ), ] 
+dflargestcoipsgg
+p <- ggplot(dfgg, aes(x=`Num. of Intersecting Nodes`, y=`Num. of Edges`, color=`Net. Type`)) + 
+  geom_point(shape=20) + 
+  theme_classic() + 
+  scale_x_continuous(expand = c(0, 0), limits = c(0, 180)) + 
+  scale_y_continuous(expand = c(0, 0), limits = c(0, NA))# + 
+  #geom_vline(xintercept = 10, linetype="dashed", color = "purple") 
+p
+ggsave("test3_no_edges.svg", plot=last_plot())
+
+dflargestcoipsgg
+dflargestcoipsggmid <- dflargestcoipsgg %>% group_by(`KEGG name`) %>% summarize(x = mean(`Num. of Intersecting Nodes`), y = mean(`Num. of Edges`))
+dflargestcoipsggmid
+
+ggplot(dflargestcoipsgg, aes(x=`Num. of Intersecting Nodes`, y=`Num. of Edges`, color=`Net. Type`, label=`KEGG name`)) + 
+  geom_point(shape=20, size=5) + theme_classic() + 
+  scale_x_continuous(expand = c(0, 0), limits = c(10, 200)) + 
+  scale_y_continuous(expand = c(0, 0), limits = c(0, 500)) + 
+  geom_line(mapping=aes(group = groups), color="grey", size = 0.5, linetype="dashed") +
+  theme(text = element_text(size=20)) +
+  geom_text(data = dflargestcoipsggmid, mapping = aes(x=x, y=y, label=`KEGG name`, color="blue"), size=4, color="blue", angle=90, position=position_jitter(width=1,height=1))
+
+ggsave("test3_kegg_best_edges.png", plot = last_plot(), width=14, height=9)
+```
+
+
+
+Plot the `df` conductance results
+```{r test-3-plot-results-conductance}
+library(ggplot2)
+library(reshape2)
+library(dplyr)
+
+dfcond <- df[c("keggname", "intersecting_nodes", "coip_conductance", "y2h_conductance")]
+dfcond <- melt(dfcond, id=c("keggname", "intersecting_nodes"))
+dfcond
+colnames(dfcond) <- c("KEGG name", "Num. of Intersecting Nodes", "Net. Type", "Conductance")
+ggplot(dfcond, aes(x=`Num. of Intersecting Nodes`, y=`Conductance`, color=`Net. Type`))+
+  geom_point(shape=20) + theme(text = element_text(size=20))
+
+dfcondpts <- df[c("keggname", "coip_conductance", "y2h_conductance")]
+colnames(dfcondpts) <- c("KEGG name", "Co-IP conductance", "Y2H conductance")
+ggplot2::ggplot(dfcondpts, aes(x=`Co-IP conductance`, y=`Y2H conductance`)) + ggplot2::geom_point(data=subset(dfcondpts, `Co-IP conductance` > `Y2H conductance`), shape=20, color="red") + ggplot2::geom_point(data=subset(dfcondpts, `Co-IP conductance` < `Y2H conductance`), shape=20, color="blue") + 
+  theme(text = element_text(size = 20)) +  scale_x_continuous(expand = c(0, 0), limits = c(0, 0.15)) + 
+  scale_y_continuous(expand = c(0, 0), limits = c(0, 0.125)) + geom_abline(intercept = 0, slope=1, linetype= "dashed", color="gray")
+  #geom_text(data=subset(dfcondpts, `CoIP conductance` > 0.07 | `Y2H conductance` > 0.07 ), aes(x=`CoIP conductance`, y=`Y2H conductance`, label=`KEGG name`), size=2, check_overlap = TRUE)
+dfcondpts
+ggsave("test3-conductance.png", plot= last_plot())
+ 
+dfgg <- melt(df[c("keggname", "intersecting_nodes", "coip_edges", "y2h_edges")], id=c("keggname", "intersecting_nodes"))
+colnames(dfgg) <- c("KEGG name", "Num. of Intersecting Nodes", "Net. Type", "Num. of Edges")
+
+dflargestcoips <- df %>%
+  arrange(desc(coip_edges)) %>%
+  head(10)
+
+dflargestcoipsgg <- melt(dflargestcoips, id=c("keggname", "intersecting_nodes"))
+colnames(dflargestcoipsgg) <- c("KEGG name", "Num. of Intersecting Nodes", "Net. Type", "Num. of Edges")
+dflargestcoipsgg$`KEGG name` <- sapply(dflargestcoipsgg$`KEGG name`, function(i){return(gsub("KEGG_", "", i))})
+
+ggplot(dfgg, aes(x=`Num. of Intersecting Nodes`, y=`Num. of Edges`, color=`Net. Type`)) + 
+  geom_point(shape=20) + theme_classic()
+
+
+
+ggplot(dflargestcoipsgg, aes(x=`Num. of Intersecting Nodes`, y=`Num. of Edges`, color=`Net. Type`, label=`KEGG name`)) + 
+  geom_point(shape=20) + theme_classic() + geom_text(hjust=0.7, vjust=0, size=2)
+
+```
